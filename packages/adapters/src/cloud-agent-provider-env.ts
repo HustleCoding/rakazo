@@ -1,5 +1,5 @@
 /**
- * Empty / unknown / cursor-without-key becomes none so the API still boots and
+ * Empty / unknown / incomplete live configuration becomes none so the API still boots and
  * cloud-agent tools stay uninjected.
  */
 export function resolveCloudAgentProvider(source: NodeJS.ProcessEnv = process.env): string {
@@ -11,6 +11,16 @@ export function resolveCloudAgentProvider(source: NodeJS.ProcessEnv = process.en
   if (requested === "cursor") {
     return optional(source.CURSOR_API_KEY) && optional(source.CLOUD_AGENT_SPACE_ID)
       ? "cursor"
+      : "none";
+  }
+  if (requested === "devin") {
+    const limit = Number(source.DEVIN_MAX_ACU_LIMIT);
+    return optional(source.DEVIN_API_KEY) &&
+      /^org-[a-zA-Z0-9-]+$/.test(source.DEVIN_ORG_ID?.trim() ?? "") &&
+      optional(source.CLOUD_AGENT_SPACE_ID) &&
+      Number.isSafeInteger(limit) &&
+      limit > 0
+      ? "devin"
       : "none";
   }
   // Soft-fall: do not throw at API boot for typos / future vendor names.

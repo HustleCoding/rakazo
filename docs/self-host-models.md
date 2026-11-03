@@ -31,6 +31,13 @@ the API and worker, for models that have no stored credential.
 
 `RAKAZO_LIVE_MODEL_CATALOG=off` disables provider and Codex live catalog probing; the default is on.
 
+## Direct DeepSeek connection
+
+In **Settings → Models**, connect **DeepSeek** with a key from DeepSeek and choose
+`deepseek-flash`. Make it the main model for the Space to use it for conversations and bot
+tools. This connection uses DeepSeek's API directly; it does not use OpenRouter or a deployment
+environment variable. Keys saved through settings are encrypted at rest.
+
 ## Approvals
 
 Approvals have three modes in **Settings → Approvals**: Never ask runs every action, Auto lets an
