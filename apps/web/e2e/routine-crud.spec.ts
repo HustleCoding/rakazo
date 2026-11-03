@@ -16,6 +16,49 @@ async function addScheduleTrigger(page: Page, freq: string) {
   await page.getByRole("menuitem", { name: freq, exact: true }).click();
 }
 
+test("an open routine editor refreshes Active and the saved next-run time without losing edits", async ({
+  page,
+}, testInfo) => {
+  await signup(page, `routine-sync-${Date.now()}@rakazo.test`, "password12", "Routine sync");
+  await completeOnboarding(page);
+  const botId = activeBotId(page);
+  const routine = await rpc<Routine>(page, "routines/create", {
+    botId,
+    name: "One-shot reminder",
+    prompt: "Return a short reminder.",
+    crons: ["@once"],
+    timezone: "America/New_York",
+    active: false,
+  });
+  const runAt = new Date(Date.now() + 60 * 60_000).toISOString();
+  await rpc(page, "routines/update", { routineId: routine.id, active: true, runAt });
+
+  await page.reload();
+  await openBotPanelTab(page, "Routines");
+  await page.getByRole("button", { name: /One-shot reminder/ }).click();
+  const active = page.getByRole("switch", { name: "Active", exact: true });
+  const nextRun = page.getByTestId("routine-next-run");
+  await expect(active).toBeChecked();
+  await expect(nextRun.locator("time")).toHaveAttribute("datetime", runAt);
+  await expect(nextRun).toContainText(
+    new Date(runAt).toLocaleString("en", {
+      timeZone: "America/New_York",
+      dateStyle: "medium",
+      timeStyle: "short",
+    }),
+  );
+  await captureScreenshot(page, testInfo, "routine-saved-next-run");
+
+  const name = page.locator("label:has-text('Name') input");
+  await name.fill("Unsaved reminder name");
+  await rpc(page, "routines/update", { routineId: routine.id, active: false });
+  await expect(active).not.toBeChecked({ timeout: 35_000 });
+  await expect(nextRun).toHaveCount(0);
+  await expect(name).toHaveValue("Unsaved reminder name");
+  await captureScreenshot(page, testInfo, "routine-refreshed-paused-state");
+  await rpc(page, "routines/remove", { routineId: routine.id });
+});
+
 test("a delayed schedule is visible only while the routine is active", async ({
   page,
 }, testInfo) => {

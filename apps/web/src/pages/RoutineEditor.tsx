@@ -49,7 +49,7 @@ import {
   SlidersHorizontal,
   X,
 } from "lucide-react";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useEffectEvent, useId, useState } from "react";
 import { cronLabels } from "../lib/cron";
 import {
   connectedModelOptions,
@@ -335,6 +335,7 @@ function RoutineListRow({
 export function RoutineEditor({
   draft,
   onChange,
+  onRefresh,
   editing,
   timezone,
   webhook,
@@ -352,6 +353,7 @@ export function RoutineEditor({
 }: {
   draft: RoutineDraftState;
   onChange: (next: RoutineDraftState) => void;
+  onRefresh: (routine: Routine) => void;
   editing: Routine | null;
   timezone: string;
   webhook: { path: string; secret: string | null; configured: boolean };
@@ -367,15 +369,19 @@ export function RoutineEditor({
   onDelete: () => void;
   onEnsureWebhook: () => Promise<void>;
 }) {
-  const { t } = useLingui();
+  const { i18n, t } = useLingui();
   const fieldId = useId();
   const queries = useSpaceQueries();
   const scheduleStatus = useQuery({
     ...queries.routines.list.queryOptions({ input: { botId: editing?.botId ?? "" } }),
-    enabled: editing !== null && draft.active,
+    enabled: editing !== null,
     refetchInterval: 15_000,
     select: (routines) => routines.find((routine) => routine.id === editing?.id) ?? null,
   });
+  const refreshRoutine = useEffectEvent(onRefresh);
+  useEffect(() => {
+    if (scheduleStatus.data) refreshRoutine(scheduleStatus.data);
+  }, [scheduleStatus.data, scheduleStatus.dataUpdatedAt]);
   const scheduleDelayed =
     !scheduleStatus.isError &&
     (scheduleStatus.data === undefined
@@ -681,6 +687,19 @@ export function RoutineEditor({
                 className="mt-2"
               />
             </label>
+          ) : null}
+
+          {editing?.active && editing.nextRunAt ? (
+            <p data-testid="routine-next-run" className="text-xs text-muted-foreground">
+              <Trans>Next run</Trans>{" "}
+              <time dateTime={editing.nextRunAt}>
+                {new Date(editing.nextRunAt).toLocaleString(i18n.locale || "en", {
+                  timeZone: timezone,
+                  dateStyle: "medium",
+                  timeStyle: "short",
+                })}
+              </time>
+            </p>
           ) : null}
         </div>
 
