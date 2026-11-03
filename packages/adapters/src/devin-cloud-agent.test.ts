@@ -29,10 +29,18 @@ function fixture() {
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     if (method !== "GET") writes.push({ method, body, url });
+    if (method === "GET" && url.pathname.endsWith("/sessions")) {
+      const tag = url.searchParams.get("tags");
+      return Response.json({
+        items:
+          session && session.tags instanceof Array && session.tags.includes(tag) ? [session] : [],
+        has_next_page: false,
+      });
+    }
     if (method === "POST" && !url.pathname.endsWith("/messages")) {
       if (session) return Response.json({}, { status: 409 });
       session = {
-        session_id: url.searchParams.get("devin_id")!.slice(6),
+        session_id: "devin-fixture-assigned-id",
         status: "running",
         status_detail: "working",
         title: body.title,
@@ -44,7 +52,7 @@ function fixture() {
       if (loseCreate) throw new Error("Lost create response");
       return Response.json(session);
     }
-    if (!session) return Response.json({}, { status: 404 });
+    if (!session) return Response.json({}, { status: 403 });
     if (method === "GET" && url.pathname.endsWith("/messages")) {
       return Response.json({ items: hideNewest ? messages.slice(0, -1) : messages });
     }
@@ -114,7 +122,10 @@ describe("cloud agent conformance over the Devin wire fixture (offline)", () => 
       max_acu_limit: 2,
       secret_ids: [],
       knowledge_ids: [],
+      repos: [],
     });
+    expect(f.writes[0]!.url.search).toBe("");
+    expect((await f.launch()).url).toBe("https://app.devin.ai/sessions/fixture");
     expect(String(f.writes[0]!.body!.prompt)).toContain("Do not open a pull request.");
     expect(JSON.stringify(f.writes[0]!.body)).not.toContain("fixture-key");
   });
@@ -126,6 +137,45 @@ describe("cloud agent conformance over the Devin wire fixture (offline)", () => 
     expect((await f.launch()).status).toBe("running");
     expect(f.writes).toHaveLength(1);
   });
+
+  it("never creates another session while reconciling an ambiguous launch", async () => {
+    const f = fixture();
+    const request = { idempotencyKey: "create", prompt: "Task", openPr: false };
+    await expect(f.provider.reconcileLaunch(request, context)).rejects.toBeInstanceOf(
+      CloudAgentRetryLater,
+    );
+    expect(f.writes).toHaveLength(0);
+    f.loseCreate();
+    await expect(f.launch()).rejects.toThrow();
+    expect((await f.provider.reconcileLaunch(request, context)).id).toBe(
+      "devin-fixture-assigned-id",
+    );
+    expect(f.writes).toHaveLength(1);
+  });
+
+  it.each(["duplicate", "truncated", "unscoped", "malformed"])(
+    "rejects %s launch history without creating another session",
+    async (kind) => {
+      const f = fixture();
+      await f.launch();
+      const tags = f.writes[0]!.body!.tags as string[];
+      const session = {
+        session_id: "fixture",
+        url: "https://app.devin.ai/sessions/fixture",
+        status: "running",
+        tags: kind === "unscoped" ? tags.filter((tag) => tag.startsWith("rakazo-launch-")) : tags,
+      };
+      f.fetchImpl.mockResolvedValueOnce(
+        Response.json({
+          items:
+            kind === "malformed" ? null : kind === "duplicate" ? [session, session] : [session],
+          has_next_page: kind === "truncated",
+        }),
+      );
+      await expect(f.launch()).rejects.toThrow();
+      expect(f.writes).toHaveLength(1);
+    },
+  );
 
   it("tracks distinct follow-up runs and reconciles a lost follow-up response", async () => {
     const f = fixture();

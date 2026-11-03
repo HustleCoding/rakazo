@@ -244,10 +244,15 @@ dispatch. The repository and `openPr` options become prompt instructions, not pe
 boundaries. Enforce repository and write restrictions in the remote service user's configuration.
 The adapter requests no organization secrets or knowledge on session creation.
 
-The adapter uses the v3 API's client-supplied `devin_id` for stable creates. It marks user
-messages to identify follow-up turns without relying on session update timestamps. Lost
-follow-up responses are recovered from the paginated message history. Send follow-ups through
-Rakazo; manually changing the remote conversation can leave run reconciliation pending.
+Devin assigns its own session ID. Rakazo tags each launch with a scoped, hashed intent key,
+checks for an existing session before creating one, and reconciles an uncertain create by
+listing that tag without sending another create. If a create was interrupted before reaching
+Devin, recovery remains pending rather than risking a duplicate session. This depends on the
+database's persisted dispatch intent; calling the adapter concurrently outside Rakazo is not
+an atomic idempotency guarantee. User messages carry markers to identify follow-up turns
+without relying on session update timestamps. Lost follow-up responses are recovered from the
+paginated message history. Send follow-ups through Rakazo; manually changing the remote
+conversation can leave run reconciliation pending.
 Cancellation uses session termination rather than archiving and is confirmed by a subsequent
 status read. See the [session API](https://docs.devin.ai/api-reference/v3/sessions/post-organizations-sessions).
 

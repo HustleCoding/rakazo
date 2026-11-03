@@ -27,6 +27,11 @@ const messagesSchema = z.object({
   has_next_page: z.boolean().default(false),
   end_cursor: z.string().nullish(),
 });
+const sessionsSchema = z.object({
+  items: z.array(sessionSchema),
+  has_next_page: z.boolean().default(false),
+  end_cursor: z.string().nullish(),
+});
 
 export interface DevinCloudAgentOptions {
   apiKey: string;
@@ -36,7 +41,7 @@ export interface DevinCloudAgentOptions {
   timeoutMs?: number;
 }
 
-/** Session ids and user-message markers reconcile retries without starting duplicate work. */
+/** Scoped launch tags and user-message markers reconcile retries without starting duplicate work. */
 export class DevinCloudAgentProvider implements CloudAgentProvider {
   private readonly apiKey: string;
   private readonly organizationId: string;
@@ -71,14 +76,9 @@ export class DevinCloudAgentProvider implements CloudAgentProvider {
   ): Promise<CloudAgentHandle> {
     rejectImages(request);
     const signal = request.signal ?? context.signal;
-    const id = `devin-${digest(`${this.organizationId}:${scope(context)}:${request.idempotencyKey}`).slice(0, 32)}`;
-    try {
-      return await this.get(id, { ...context, signal });
-    } catch (error) {
-      if (!(error instanceof CloudAgentRequestRejected) || error.reason !== "not_found")
-        throw error;
-    }
-    const token = digest(request.idempotencyKey).slice(0, 32);
+    const existing = await this.findLaunch(request, context, signal);
+    if (existing) return { ...this.snapshot(existing), latestRunId: launchToken(request) };
+    const token = launchToken(request);
     const prompt = [
       request.repository ? `Work only in this repository: ${request.repository}` : undefined,
       request.openPr === false
@@ -95,25 +95,50 @@ export class DevinCloudAgentProvider implements CloudAgentProvider {
       const session = this.parseSession(
         await this.request(
           "POST",
-          `?devin_id=${id}`,
+          "",
           {
             prompt: withRunMarker(prompt, token),
             title: request.prompt.split(/\r?\n/, 1)[0]!.slice(0, 80),
-            tags: ["rakazo", scope(context)],
+            tags: ["rakazo", scope(context), launchTag(request, context, this.organizationId)],
             max_acu_limit: this.maxAcuLimit,
             secret_ids: [],
             knowledge_ids: [],
+            repos: request.repository ? [request.repository] : [],
           },
           signal,
         ),
-        id,
+        undefined,
         context,
       );
       return { ...this.snapshot(session), latestRunId: token };
     } catch (error) {
       if (!(error instanceof DevinConflict)) throw error;
-      return this.get(id, { ...context, signal });
+      return this.reconcileLaunch(request, { ...context, signal });
     }
+  }
+
+  async reconcileLaunch(request: CloudAgentLaunchRequest, context: AdapterContext) {
+    const existing = await this.findLaunch(request, context, request.signal ?? context.signal);
+    if (!existing) throw new CloudAgentRetryLater("unavailable");
+    return { ...this.snapshot(existing), latestRunId: launchToken(request) };
+  }
+
+  private async findLaunch(
+    request: CloudAgentLaunchRequest,
+    context: AdapterContext,
+    signal: AbortSignal,
+  ) {
+    const tag = launchTag(request, context, this.organizationId);
+    const query = new URLSearchParams({ tags: tag, first: "2" });
+    const parsed = sessionsSchema.safeParse(
+      await this.request("GET", `?${query}`, undefined, signal),
+    );
+    if (!parsed.success || parsed.data.has_next_page || parsed.data.items.length > 1)
+      throw new Error("Invalid cloud agent launch history");
+    const [session] = parsed.data.items;
+    if (!session) return undefined;
+    if (!session.tags.includes(tag)) throw new Error("Invalid cloud agent launch history");
+    return this.parseSession(session, undefined, context);
   }
 
   async get(id: string, context: AdapterContext, runId?: string): Promise<CloudAgentSnapshot> {
@@ -177,9 +202,9 @@ export class DevinCloudAgentProvider implements CloudAgentProvider {
     );
   }
 
-  private parseSession(data: unknown, id: string, context: AdapterContext) {
+  private parseSession(data: unknown, id: string | undefined, context: AdapterContext) {
     const parsed = sessionSchema.safeParse(data);
-    if (!parsed.success || normalizedId(parsed.data.session_id) !== id)
+    if (!parsed.success || (id && normalizedId(parsed.data.session_id) !== id))
       throw new Error("Invalid cloud agent response");
     if (!parsed.data.tags.includes("rakazo") || !parsed.data.tags.includes(scope(context)))
       throw new CloudAgentRequestRejected("not_found");
@@ -191,7 +216,7 @@ export class DevinCloudAgentProvider implements CloudAgentProvider {
     return {
       id,
       title: session.title || "Cloud agent",
-      url: `https://app.devin.ai/sessions/${id.slice(6)}`,
+      url: session.url,
       status: status(session),
       ...(session.pull_requests[0] ? { prUrl: session.pull_requests[0].pr_url } : {}),
     };
@@ -290,6 +315,12 @@ function digest(value: string) {
 }
 function scope(context: AdapterContext) {
   return `rakazo-scope-${digest(JSON.stringify([context.spaceId, context.userId]))}`;
+}
+function launchTag(request: CloudAgentLaunchRequest, context: AdapterContext, org: string) {
+  return `rakazo-launch-${digest(`${org}:${scope(context)}:${request.idempotencyKey}`).slice(0, 32)}`;
+}
+function launchToken(request: CloudAgentLaunchRequest) {
+  return digest(request.idempotencyKey).slice(0, 32);
 }
 function normalizedId(value: string) {
   return value.startsWith("devin-") ? value : `devin-${value}`;
