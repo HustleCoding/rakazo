@@ -77,7 +77,7 @@ export async function pollCloudAgent(
       return;
     }
     if (!agent.remoteId) {
-      // Write dispatch intent before I/O; a crash replays the same idempotent create.
+      // Write dispatch intent before I/O so a crash recovers without duplicating work.
       const marked = await deps.prisma.cloudAgent.updateMany({
         where: fence(agent),
         data: { launchDispatched: true },
@@ -85,7 +85,11 @@ export async function pollCloudAgent(
       if (!marked.count) return;
       const request = cloudAgentLaunchSchema.parse(agent.launchRequest);
       try {
-        const snapshot = await provider.launch({ ...request, idempotencyKey: agent.id }, context);
+        const launch = { ...request, idempotencyKey: agent.id };
+        const snapshot =
+          agent.launchDispatched && provider.reconcileLaunch
+            ? await provider.reconcileLaunch(launch, context)
+            : await provider.launch(launch, context);
         await finishPoll(
           deps,
           agent,

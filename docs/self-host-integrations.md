@@ -218,6 +218,44 @@ The tools are `cloud_agent_launch`, `cloud_agent_status`, `cloud_agent_reply`, a
 
 Launch accepts a prompt, optional repository, images, and `openPr`. Raw environment variables are intentionally unsupported: passing secrets through model-generated tool arguments would persist them in ordinary history. Configure remote environment secrets directly with the provider.
 
+### Enable Devin
+
+Configure both the API and worker:
+
+```dotenv
+CLOUD_AGENT_PROVIDER=devin
+CLOUD_AGENT_SPACE_ID=example-space-id
+DEVIN_API_KEY=replace-with-your-service-user-key
+DEVIN_ORG_ID=org-example
+DEVIN_MAX_ACU_LIMIT=5
+```
+
+All five values are required. The usage limit must be a positive integer and applies to the
+whole remote session, including follow-ups. Use a dedicated service user with access only to
+the repositories that the authorized Space should use. Its role needs `UseDevinSessions` to
+create sessions and `ManageOrgSessions` to send follow-ups. A service user can view and cancel
+sessions it created; `ViewOrgSessions` is needed only for sessions owned by someone else. Never
+use a personal credential with broader repository access on a shared deployment.
+
+Devin runs on its own computer, not the bot's Rakazo computer. Existing action approvals still
+apply. A turn waiting for user input is reported as finished so Rakazo can send a follow-up;
+provider approvals must be resolved through the session link. Images are rejected before
+dispatch. The repository and `openPr` options become prompt instructions, not permission
+boundaries. Enforce repository and write restrictions in the remote service user's configuration.
+The adapter requests no organization secrets or knowledge on session creation.
+
+Devin assigns its own session ID. Rakazo tags each launch with a scoped, hashed intent key,
+checks for an existing session before creating one, and reconciles an uncertain create by
+listing that tag without sending another create. If a create was interrupted before reaching
+Devin, recovery remains pending rather than risking a duplicate session. This depends on the
+database's persisted dispatch intent; calling the adapter concurrently outside Rakazo is not
+an atomic idempotency guarantee. User messages carry markers to identify follow-up turns
+without relying on session update timestamps. Lost follow-up responses are recovered from the
+paginated message history. Send follow-ups through Rakazo; manually changing the remote
+conversation can leave run reconciliation pending.
+Cancellation uses session termination rather than archiving and is confirmed by a subsequent
+status read. See the [session API](https://docs.devin.ai/api-reference/v3/sessions/post-organizations-sessions).
+
 ### Recovery
 
 The database stores ownership and pending operations independently of chat cards. The worker and reconciler recover queue failures and interrupted launches. Cursor creates use a stable client agent ID, so retrying an accepted create does not create another remote agent.

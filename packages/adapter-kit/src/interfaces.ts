@@ -653,6 +653,11 @@ export interface BrowserProvider {
 export interface CloudAgentProvider {
   describe(): AdapterDescriptor<CloudAgentCapabilities>;
   launch(request: CloudAgentLaunchRequest, context: AdapterContext): Promise<CloudAgentHandle>;
+  /** Read-only recovery after a persisted create intent; never dispatch another create. */
+  reconcileLaunch?(
+    request: CloudAgentLaunchRequest,
+    context: AdapterContext,
+  ): Promise<CloudAgentHandle>;
   get(id: string, context: AdapterContext, runId?: string): Promise<CloudAgentSnapshot>;
   reply(
     id: string,

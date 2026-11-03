@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AdapterContext, BackgroundJob, JobPublisher } from "@rakazo/adapter-kit";
+import { CloudAgentRetryLater } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
 import {
   asSystem,
@@ -556,6 +557,23 @@ describePostgres("cloud agent lifecycle and recovery (PostgreSQL + Cursor emulat
     await h.poll(id);
     expect((await h.state(id)).remoteId).toBeTruthy();
     expect(h.wire.agents.size).toBe(1);
+  });
+
+  it("reconciles an ambiguous launch without dispatching a second create", async () => {
+    const h = await setup();
+    const id = await h.launch();
+    h.wire.failNextRequest = 503;
+    const launch = vi.spyOn(h.connection.provider, "launch");
+    const reconcile = vi.fn(async () => {
+      throw new CloudAgentRetryLater("unavailable");
+    });
+    h.connection.provider.reconcileLaunch = reconcile;
+    await h.poll(id);
+    expect(launch).toHaveBeenCalledTimes(1);
+    await h.poll(id);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(launch).toHaveBeenCalledTimes(1);
+    expect(await h.state(id)).toMatchObject({ remoteId: null, status: "running" });
   });
 
   it("fences concurrent pollers and preserves cancellation during launch", async () => {
