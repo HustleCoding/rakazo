@@ -167,6 +167,7 @@ function RoutineShot() {
       <RoutineEditor
         draft={draft}
         onChange={setDraft}
+        onRefresh={() => undefined}
         editing={null}
         timezone="UTC"
         webhook={{ path: "/hooks/demo", secret: null, configured: false }}

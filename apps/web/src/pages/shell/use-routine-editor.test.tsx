@@ -107,6 +107,71 @@ it("sends on/off only when the save changes it", async () => {
   expect(update.mock.calls[1]![0]).toMatchObject({ active: false });
 });
 
+it("refreshes an automatically paused routine without losing unsaved edits", async () => {
+  const armed = { ...routine, crons: ["@once"], nextRunAt: "2026-11-03T21:05:00.000Z" };
+  const completed = {
+    ...armed,
+    active: false,
+    nextRunAt: null,
+    lastRunAt: "2026-11-03T21:05:00.000Z",
+  };
+  act(() => editor.editRoutine(armed));
+  act(() =>
+    editor.editorProps!.onChange({
+      ...editor.editorProps!.draft,
+      name: "Unsaved name",
+      prompt: "Unsaved instruction",
+    }),
+  );
+  act(() => editor.editorProps!.onRefresh(completed));
+
+  expect(editor.editingRoutine).toEqual(completed);
+  expect(editor.editorProps!.draft).toMatchObject({
+    active: false,
+    name: "Unsaved name",
+    prompt: "Unsaved instruction",
+  });
+  update.mockResolvedValue(completed);
+  await act(async () => {
+    await editor.editorProps!.onSave();
+  });
+  expect(update.mock.calls[0]![0]).not.toHaveProperty("active");
+});
+
+it("preserves an unsaved Active change when server state refreshes", async () => {
+  const paused = { ...routine, active: false };
+  act(() => editor.editRoutine(paused));
+  act(() => editor.editorProps!.onChange({ ...editor.editorProps!.draft, active: true }));
+  act(() => editor.editorProps!.onRefresh({ ...paused, lastRunAt: "2026-11-03T21:05:00.000Z" }));
+  expect(editor.editorProps!.draft.active).toBe(true);
+
+  update.mockResolvedValue({ ...paused, active: true });
+  await act(async () => {
+    await editor.editorProps!.onSave();
+  });
+  expect(update.mock.calls[0]![0]).toMatchObject({ active: true });
+});
+
+it("ignores refreshes for another routine or bot and while saving", async () => {
+  act(() => editor.editRoutine(routine));
+  act(() => editor.editorProps!.onRefresh({ ...routine, id: "routine-2", active: false }));
+  act(() => editor.editorProps!.onRefresh({ ...routine, botId: "bot-2", active: false }));
+  expect(editor.editingRoutine).toEqual(routine);
+
+  let saving!: Promise<void>;
+  act(() => {
+    saving = editor.editorProps!.onSave() as unknown as Promise<void>;
+  });
+  act(() => editor.editorProps!.onRefresh({ ...routine, active: false }));
+  expect(editor.editorProps!.draft.active).toBe(true);
+  await act(async () => {
+    finishUpdate(routine);
+    await saving;
+  });
+  act(() => editor.editorProps!.onRefresh({ ...routine, active: false }));
+  expect(editor.editorProps!.draft.active).toBe(false);
+});
+
 it("shows a revealed webhook secret only for the bot it belongs to", async () => {
   let finishRotate!: (result: { secret: string }) => void;
   rotateWebhookSecret.mockImplementation(() => new Promise((resolve) => (finishRotate = resolve)));

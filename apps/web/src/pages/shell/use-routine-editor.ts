@@ -94,6 +94,23 @@ export function useRoutineEditor({
     ? ({
         draft: routineDraft,
         onChange: setRoutineDraft,
+        onRefresh: (routine) => {
+          if (
+            !editingRoutine ||
+            routine.id !== editingRoutine.id ||
+            routine.botId !== active.id ||
+            routine === editingRoutine ||
+            routineSavePending.current
+          ) {
+            return;
+          }
+          setEditingRoutine(routine);
+          setRoutineDraft((current) =>
+            current.active === editingRoutine.active && current.active !== routine.active
+              ? { ...current, active: routine.active }
+              : current,
+          );
+        },
         editing: editingRoutine,
         timezone: editingRoutine?.timezone ?? timezone ?? localTimezone(),
         webhook: {
