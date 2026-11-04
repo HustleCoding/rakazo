@@ -840,7 +840,8 @@ export const builtinAgentTools: ConnectorTool[] = [
   },
   {
     name: "cloud_agent_status",
-    description: "Get status, branch, and PR url for a cloud coding agent.",
+    description:
+      "Get a cloud coding agent's status and recent conversation through its API when supported. Branch and PR URL are optional. Read conversation.messages for the agent's reported results; finished alone does not prove tests passed. Conversation may be pending, unsupported, unavailable, or truncated. Do not use browser login to retrieve these API results.",
     inputSchema: {
       type: "object",
       properties: {

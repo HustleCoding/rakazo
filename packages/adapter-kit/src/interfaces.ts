@@ -26,6 +26,7 @@ import type {
   BrowserSnapshotRequest,
   BrowserSnapshotResult,
   CloudAgentCapabilities,
+  CloudAgentConversation,
   CloudAgentHandle,
   CloudAgentLaunchRequest,
   CloudAgentReplyRequest,
@@ -659,6 +660,8 @@ export interface CloudAgentProvider {
     context: AdapterContext,
   ): Promise<CloudAgentHandle>;
   get(id: string, context: AdapterContext, runId?: string): Promise<CloudAgentSnapshot>;
+  /** Read a bounded conversation through the provider API, without resuming work. */
+  getConversation?(id: string, context: AdapterContext): Promise<CloudAgentConversation>;
   reply(
     id: string,
     request: CloudAgentReplyRequest,

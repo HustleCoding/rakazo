@@ -189,6 +189,55 @@ describePostgres("cloud agent lifecycle and recovery (PostgreSQL + Cursor emulat
     ).not.toBeNull();
   });
 
+  it("returns API conversation results through the existing read-only status tool", async () => {
+    const h = await setup();
+    const id = await h.launch();
+    await h.poll(id);
+    await h.finish(id);
+    const before = await h.state(id);
+    const conversation = {
+      messages: [{ id: "answer", role: "assistant" as const, text: "Reported test output" }],
+      latestRunId: before.latestRunId!,
+      truncated: false,
+    };
+    const read = vi.fn(async () => conversation);
+    h.connection.provider.getConversation = read;
+    expect(await h.tool("status", { id })).toMatchObject({
+      status: "finished",
+      conversation: { available: true, ...conversation },
+    });
+    expect(read).toHaveBeenCalledExactlyOnceWith(before.remoteId, h.context);
+    expect(await h.state(id)).toEqual(before);
+    expect(await h.tool("status", { id }, { userId: "other" })).toHaveProperty("error");
+    expect(await h.tool("status", { id }, { spaceId: "other" })).toHaveProperty("error");
+    h.connection.key = "rotated";
+    expect(await h.tool("status", { id })).toHaveProperty("error");
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports pending, unsupported and unavailable conversations without leaking API errors", async () => {
+    const h = await setup();
+    const id = await h.launch();
+    expect(await h.tool("status", { id })).toHaveProperty("conversation.reason", "unsupported");
+    const read = vi.fn(async () => {
+      throw new Error("private response with fixture-key");
+    });
+    h.connection.provider.getConversation = read;
+    expect(await h.tool("status", { id })).toHaveProperty("conversation.reason", "pending");
+    expect(read).not.toHaveBeenCalled();
+    await h.poll(id);
+    await h.finish(id);
+    const result = await h.tool("status", { id });
+    expect(result).toMatchObject({
+      status: "finished",
+      conversation: { available: false, reason: "unavailable" },
+    });
+    expect(JSON.stringify(result)).not.toContain("fixture-key");
+    expect(await h.tool("reply", { id, prompt: "Follow up" })).not.toHaveProperty("conversation");
+    expect(await h.tool("status", { id })).toHaveProperty("conversation.reason", "pending");
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
   it("persists before remote I/O, launches once, and wakes exactly once per generation", async () => {
     const h = await setup();
     const id = await h.launch();

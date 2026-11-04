@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
   AdapterContext,
+  CloudAgentConversation,
   CloudAgentHandle,
   CloudAgentLaunchRequest,
   CloudAgentProvider,
@@ -143,11 +144,16 @@ export class DevinCloudAgentProvider implements CloudAgentProvider {
 
   async get(id: string, context: AdapterContext, runId?: string): Promise<CloudAgentSnapshot> {
     const session = await this.session(id, context);
-    const latestRunId = await this.latestRunId(id, context.signal);
+    const { latestRunId } = await this.messageHistory(id, context.signal);
     // A newly accepted message may not be visible yet. Never finish its run using old metadata.
     if (runId && runId !== latestRunId)
       return { ...this.snapshot(session), status: "running", latestRunId: runId };
     return { ...this.snapshot(session), latestRunId };
+  }
+
+  async getConversation(id: string, context: AdapterContext): Promise<CloudAgentConversation> {
+    await this.session(id, context);
+    return this.messageHistory(id, context.signal);
   }
 
   async reply(
@@ -222,9 +228,12 @@ export class DevinCloudAgentProvider implements CloudAgentProvider {
     };
   }
 
-  private async latestRunId(id: string, signal: AbortSignal): Promise<string> {
+  private async messageHistory(id: string, signal: AbortSignal): Promise<CloudAgentConversation> {
     let cursor: string | undefined;
     let latest: string | undefined;
+    const messages: CloudAgentConversation["messages"] = [];
+    let characters = 0;
+    let truncated = false;
     for (let page = 0; page < 100; page++) {
       const query = new URLSearchParams({ first: "100" });
       if (cursor) query.set("after", cursor);
@@ -241,10 +250,27 @@ export class DevinCloudAgentProvider implements CloudAgentProvider {
         if (message.source === "user")
           latest =
             /\n\n\[rakazo-run:([a-f0-9]{32})\]$/.exec(message.message)?.[1] ?? message.event_id;
+        if (message.source !== "user" && message.source !== "devin") continue;
+        const text =
+          message.source === "user"
+            ? message.message.replace(/\n\n\[rakazo-run:[a-f0-9]{32}\]$/, "")
+            : message.message;
+        if (text.length > 40_000) truncated = true;
+        const bounded = text.slice(-40_000);
+        messages.push({
+          id: message.event_id,
+          role: message.source === "user" ? "user" : "assistant",
+          text: bounded,
+        });
+        characters += bounded.length;
+        while (messages.length > 20 || characters > 40_000) {
+          characters -= messages.shift()!.text.length;
+          truncated = true;
+        }
       }
       if (!parsed.data.has_next_page) {
         if (!latest) throw new Error("Cloud agent message is not visible yet");
-        return latest;
+        return { messages, latestRunId: latest, truncated };
       }
       if (!parsed.data.end_cursor || parsed.data.end_cursor === cursor)
         throw new Error("Invalid cloud agent messages cursor");
