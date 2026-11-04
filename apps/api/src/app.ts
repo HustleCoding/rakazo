@@ -629,6 +629,9 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     CLOUD_AGENT_PROVIDER: env.cloudAgentProvider,
     CURSOR_API_KEY: env.cursorApiKey,
     CLOUD_AGENT_SPACE_ID: env.cloudAgentSpaceId,
+    DEVIN_API_KEY: env.devinApiKey,
+    DEVIN_ORG_ID: env.devinOrgId,
+    DEVIN_MAX_ACU_LIMIT: env.devinMaxAcuLimit,
   });
   const paymentWallet = await createPaymentWalletProvider({
     PAYMENT_WALLET_PROVIDER: env.paymentWalletProvider,
@@ -666,6 +669,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       env.deploymentModelKey ?? "",
       env.composioApiKey ?? "",
       env.cursorApiKey ?? "",
+      env.devinApiKey ?? "",
       process.env.TYPESAFE_API_KEY ?? "",
     ].filter(Boolean),
     secretStore: secrets,
