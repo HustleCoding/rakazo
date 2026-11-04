@@ -7,6 +7,25 @@ const base = {
 };
 
 describe("loadEnv", () => {
+  it("preserves the configured cloud-agent credentials and usage cap", () => {
+    expect(
+      loadEnv({
+        ...base,
+        CLOUD_AGENT_PROVIDER: "devin",
+        CLOUD_AGENT_SPACE_ID: " space-fixture ",
+        DEVIN_API_KEY: " test-cloud-key ",
+        DEVIN_ORG_ID: " org-fixture ",
+        DEVIN_MAX_ACU_LIMIT: " 1 ",
+      }),
+    ).toMatchObject({
+      cloudAgentProvider: "devin",
+      cloudAgentSpaceId: "space-fixture",
+      devinApiKey: "test-cloud-key",
+      devinOrgId: "org-fixture",
+      devinMaxAcuLimit: "1",
+    });
+  });
+
   it("defaults the attachment count to four and accepts configured bounds", () => {
     expect(loadEnv(base).maxAttachmentsPerMessage).toBe(4);
     expect(loadEnv({ ...base, MAX_ATTACHMENTS_PER_MESSAGE: " " }).maxAttachmentsPerMessage).toBe(4);
