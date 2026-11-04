@@ -1288,6 +1288,12 @@ export interface CloudAgentSnapshot {
   latestRunId?: string;
 }
 
+export interface CloudAgentConversation {
+  messages: { id: string; role: "user" | "assistant"; text: string }[];
+  latestRunId: string;
+  truncated: boolean;
+}
+
 export interface CloudAgentReplyRequest {
   prompt: string;
   images?: CloudAgentImage[];

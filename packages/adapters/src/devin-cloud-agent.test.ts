@@ -33,7 +33,7 @@ function fixture() {
       const tag = url.searchParams.get("tags");
       return Response.json({
         items:
-          session && session.tags instanceof Array && session.tags.includes(tag) ? [session] : [],
+          session && Array.isArray(session.tags) && session.tags.includes(tag) ? [session] : [],
         has_next_page: false,
       });
     }
@@ -103,6 +103,85 @@ function fixture() {
 }
 
 describe("cloud agent conformance over the Devin wire fixture (offline)", () => {
+  it("reads reported results and follow-ups through GET only, without internal run markers", async () => {
+    const f = fixture();
+    const first = await f.launch();
+    f.messages.push({ source: "devin", message: "npm test: 6 passed", event_id: "answer" });
+    f.finish();
+    const next = await f.provider.reply(first.id, { prompt: "Add edge cases" }, context);
+    f.messages.push({ source: "devin", message: "npm test: 8 passed", event_id: "followup" });
+    const writes = f.writes.length;
+    const result = await f.provider.getConversation(first.id, context);
+    expect(result).toMatchObject({ latestRunId: next.latestRunId, truncated: false });
+    expect(result.messages.map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: "user", text: expect.stringContaining("Task") },
+      { role: "assistant", text: "npm test: 6 passed" },
+      { role: "user", text: "Add edge cases" },
+      { role: "assistant", text: "npm test: 8 passed" },
+    ]);
+    expect(JSON.stringify(result)).not.toContain("rakazo-run:");
+    expect(f.writes).toHaveLength(writes);
+  });
+
+  it("checks session ownership before reading any conversation", async () => {
+    const f = fixture();
+    const first = await f.launch();
+    f.fetchImpl.mockClear();
+    await expect(
+      f.provider.getConversation(first.id, { ...context, userId: "other" }),
+    ).rejects.toBeInstanceOf(CloudAgentRequestRejected);
+    expect(f.fetchImpl.mock.calls.some(([url]) => String(url).includes("/messages"))).toBe(false);
+  });
+
+  it("reads subsequent API pages in order and correlates the newest user turn", async () => {
+    const f = fixture();
+    const first = await f.launch();
+    const original = f.fetchImpl.getMockImplementation()!;
+    f.fetchImpl.mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      if (!url.pathname.endsWith("/messages")) return original(input, init);
+      return Response.json(
+        url.searchParams.get("after")
+          ? { items: [{ source: "devin", message: "Result", event_id: "answer" }] }
+          : { items: f.messages, has_next_page: true, end_cursor: "page-2" },
+      );
+    });
+    const result = await f.provider.getConversation(first.id, context);
+    expect(result.messages.map(({ id }) => id)).toEqual(["initial", "answer"]);
+    expect(result.latestRunId).toBe(first.latestRunId);
+    expect(f.fetchImpl.mock.calls.some(([url]) => String(url).includes("after=page-2"))).toBe(true);
+  });
+
+  it("bounds the recent conversation and marks omitted content", async () => {
+    const f = fixture();
+    const first = await f.launch();
+    for (let i = 0; i < 25; i++)
+      f.messages.push({ source: "devin", message: `Result ${i}`, event_id: `answer-${i}` });
+    const recent = await f.provider.getConversation(first.id, context);
+    expect(recent.messages).toHaveLength(20);
+    expect(recent.truncated).toBe(true);
+    f.messages.push({ source: "devin", message: "x".repeat(45_000), event_id: "large" });
+    const bounded = await f.provider.getConversation(first.id, context);
+    expect(bounded.messages).toEqual([
+      { id: "large", role: "assistant", text: "x".repeat(40_000) },
+    ]);
+    expect(bounded.truncated).toBe(true);
+    expect(bounded.latestRunId).toBe(first.latestRunId);
+  });
+
+  it("rejects repeated pagination cursors instead of returning an incomplete result", async () => {
+    const f = fixture();
+    const first = await f.launch();
+    const original = f.fetchImpl.getMockImplementation()!;
+    f.fetchImpl.mockImplementation(async (input, init) =>
+      String(input).includes("/messages")
+        ? Response.json({ items: f.messages, has_next_page: true, end_cursor: "same" })
+        : original(input, init),
+    );
+    await expect(f.provider.getConversation(first.id, context)).rejects.toThrow("cursor");
+    expect(f.writes).toHaveLength(1);
+  });
+
   it("replays a launch across adapter instances without duplicate work", async () => {
     const f = fixture();
     const first = await f.launch();

@@ -145,12 +145,32 @@ export async function executeCloudAgentTool(
   }
   if (agent.nextPollAt) await enqueueCloudAgent(deps, agent.id);
   const { kind: _kind, agentId, ...snapshot } = cloudAgentBlock(agent);
+  const conversation =
+    name === "cloud_agent_status" ? await readConversation(connection, agent, context) : undefined;
   return {
     id: agentId,
     ...snapshot,
+    ...(conversation ? { conversation } : {}),
     ...(agent.cancelRequested ? { cancellationPending: true } : {}),
     ...(agent.followupDispatchedAt ? { followupPending: true } : {}),
   };
+}
+
+async function readConversation(
+  connection: CloudAgentConnection,
+  agent: CloudAgent,
+  context: AdapterContext,
+) {
+  if (!connection.provider.getConversation) return { available: false, reason: "unsupported" };
+  if (!agent.remoteId || agent.followup) return { available: false, reason: "pending" };
+  try {
+    return {
+      available: true,
+      ...(await connection.provider.getConversation(agent.remoteId, context)),
+    };
+  } catch {
+    return { available: false, reason: "unavailable" };
+  }
 }
 
 /** The row is the outbox; queue failure leaves recoverable intent for the reconciler. */
