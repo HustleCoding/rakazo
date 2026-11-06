@@ -4744,6 +4744,10 @@ msgstr "הבוט הבא או הקודם"
 msgid "Next page"
 msgstr "העמוד הבא"
 
+#: src/pages/RoutineEditor.tsx
+msgid "Next run"
+msgstr ""
+
 #: src/pages/SettingsOverlay.tsx
 msgid "Next settings sections"
 msgstr ""

@@ -4744,6 +4744,10 @@ msgstr "Nächster oder vorheriger Bot"
 msgid "Next page"
 msgstr "Nächste Seite"
 
+#: src/pages/RoutineEditor.tsx
+msgid "Next run"
+msgstr ""
+
 #: src/pages/SettingsOverlay.tsx
 msgid "Next settings sections"
 msgstr ""

@@ -4745,6 +4745,10 @@ msgstr "下一個或上一個機器人"
 msgid "Next page"
 msgstr "下一頁"
 
+#: src/pages/RoutineEditor.tsx
+msgid "Next run"
+msgstr ""
+
 #: src/pages/SettingsOverlay.tsx
 msgid "Next settings sections"
 msgstr "下一組設定區段"
