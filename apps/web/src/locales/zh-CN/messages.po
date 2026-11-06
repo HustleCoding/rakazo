@@ -4746,7 +4746,7 @@ msgstr "下一页"
 
 #: src/pages/RoutineEditor.tsx
 msgid "Next run"
-msgstr ""
+msgstr "下次运行"
 
 #: src/pages/SettingsOverlay.tsx
 msgid "Next settings sections"

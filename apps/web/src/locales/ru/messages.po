@@ -4746,7 +4746,7 @@ msgstr "Следующая страница"
 
 #: src/pages/RoutineEditor.tsx
 msgid "Next run"
-msgstr ""
+msgstr "Следующий запуск"
 
 #: src/pages/SettingsOverlay.tsx
 msgid "Next settings sections"
