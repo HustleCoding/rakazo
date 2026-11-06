@@ -1,6 +1,7 @@
 import type { ProductAnalytics, RealtimeFanout } from "@rakazo/adapter-kit";
 import type {
   BotSecretDestination,
+  ChatAlert,
   LoginFieldInput,
   MessageBlock,
   OneTimeCodeTarget,
@@ -42,8 +43,13 @@ import { approvalEffectKey } from "@rakazo/core/node/approval-effect-key";
 import { getLogger } from "@rakazo/logging";
 import { saveApprovalRule, storedBatchActions } from "./approval-settings.js";
 import { cancelRunsInTransaction } from "./cancel-runs.js";
+import { createChatAlerts } from "./chat-alerts.js";
 import type { Prisma, PrismaClient } from "./client.js";
-import { expireComputerExecutionLeases } from "./computers.js";
+import {
+  expireComputerExecutionLeases,
+  hasActiveComputerControl,
+  holdsUserControl,
+} from "./computers.js";
 import { contentEncryptionOf } from "./content-encryption.js";
 import {
   CrossSpaceCommunicationBlockedError,
@@ -54,14 +60,19 @@ import {
   assertRunCanWriteHistory,
   assertRunIsCancelled,
   createThreadMessageInTransaction,
+  loadMessageAuthor,
   partialReplyClientNonce,
   RunHistoryWriteError,
 } from "./messages.js";
+import { isRecordNotFound } from "./prisma-errors.js";
 import { deleteRunSecretsInTransaction } from "./run-secrets.js";
 import { isRunResponse, readRunTimingFields } from "./run-timing.js";
 import { RUN_TURN_CHECKPOINT_KIND } from "./run-turn-checkpoint.js";
 import { recordSecurityEvent } from "./security-events.js";
-import { withTransactionRetry } from "./transaction-retry.js";
+import { SpaceDeletionInProgressError, spaceTakesWork } from "./spaces.js";
+import { THREAD_LOCK_TRANSACTION_OPTIONS, withTransactionRetry } from "./transaction-retry.js";
+
+export { THREAD_LOCK_TRANSACTION_OPTIONS };
 
 export const STRATEGIC_INITIATIVE_NONCE_PREFIX = "strategic-initiative";
 
@@ -105,6 +116,12 @@ export function transientRunEventsWhere(): Prisma.EventWhereInput {
 export interface ThreadEvents {
   notifyIncomingCalls?(userId: string): Promise<void>;
   followIncomingCalls?(userId: string, signal?: AbortSignal): AsyncGenerator<void>;
+  publishChatAlert?(userId: string, alert: ChatAlert): Promise<void>;
+  followChatAlerts?(
+    userId: string,
+    spaceId: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<ChatAlert>;
   answerRunInput(input: AnswerRunInput): Promise<boolean>;
   append(input: AppendEventInput): Promise<ProductEvent>;
   claimSteering(input: ClaimSteeringInput): Promise<ClaimedSteeringMessage[]>;
@@ -300,6 +317,8 @@ export interface SendUserMessageInput {
   threadId: string;
   botId: string;
   userId: string;
+  /** The person who wrote the message; omitted when the sender is not a known user. */
+  authorUserId?: string;
   blocks: MessageBlock[];
   prompt: string;
   trigger: "user" | "follow_up" | "webhook" | "messaging";
@@ -356,7 +375,10 @@ export function createThreadEvents(
     analytics?: ProductAnalytics;
   } = {},
 ): ThreadEvents {
+  const chatAlerts = createChatAlerts(realtime);
   return {
+    publishChatAlert: chatAlerts.publish,
+    followChatAlerts: chatAlerts.follow,
     notifyIncomingCalls: async (userId) => {
       await realtime?.publish(`incoming-calls:${userId}`, "");
     },
@@ -384,6 +406,13 @@ export async function clearThread(
   realtime?: RealtimeFanout,
 ): Promise<ClearThreadResult> {
   const committed = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    // Group before thread, the order every group writer uses (see lockOwnedGroup).
+    if (input.groupId) {
+      await tx.$queryRaw`
+        SELECT id FROM chat_groups
+        WHERE id = ${input.groupId} AND "spaceId" = ${input.spaceId}
+        FOR NO KEY UPDATE`;
+    }
     const thread = await tx.thread.update({
       where: {
         id: input.threadId,
@@ -448,7 +477,7 @@ export async function clearThread(
       cancelledRunIds: runIds,
       historyCompactionGeneration: thread.historyCompactionGeneration,
     };
-  });
+  }, THREAD_LOCK_TRANSACTION_OPTIONS);
   await notifyRealtime(realtime, committed.event.threadId, committed.event.seq);
   if (!input.groupId && committed.userId)
     await realtime?.publish(`incoming-calls:${committed.userId}`, "").catch(() => undefined);
@@ -516,6 +545,10 @@ export async function sendUserMessage(
 
   const commit = () =>
     prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      // Webhooks, texts and other bots can reach a Space until its teardown finishes; one being
+      // deleted takes no new turns. A transcript copy that starts none is still kept.
+      if (input.createRun !== false && !(await spaceTakesWork(tx, input.spaceId)))
+        throw new SpaceDeletionInProgressError();
       // Message first: its thread-row lock serializes the whole send against clearThread, so a
       // concurrent clear either sees the committed run and cancels it, or strictly precedes this
       // transaction. Created in separate transactions, the run could land inside the clear's
@@ -525,6 +558,7 @@ export async function sendUserMessage(
         threadId: input.threadId,
         role: "user",
         blocks: input.blocks,
+        authorUserId: input.authorUserId,
         clientNonce: input.clientNonce,
       });
       if (
@@ -533,6 +567,7 @@ export async function sendUserMessage(
       ) {
         throw new CrossSpaceCommunicationBlockedError();
       }
+      const author = await loadMessageAuthor(tx, input.authorUserId);
       const createRun = input.createRun !== false;
       // Include the creation intro. It has no tools, so it must not absorb the message, and a
       // second run would overlap it on a dedicated computer. Pending steering waits for the
@@ -552,6 +587,7 @@ export async function sendUserMessage(
                 taskId: true,
                 trigger: true,
                 status: true,
+                userId: true,
                 sourceMessage: { select: { blocks: true } },
               },
             })
@@ -559,7 +595,10 @@ export async function sendUserMessage(
       // A group text never ends the owner's paused app task: it waits for it like any other turn.
       const fromGroup = hasChannelMessage(input.blocks);
       const channelId = messagingChannelId(input.blocks);
+      // A run acts with its sender's accounts, so another person's message waits for a run of
+      // their own.
       const steersRun = (run: (typeof activeRuns)[number]) =>
+        run.userId === input.userId &&
         messageSteersRun(
           input.trigger,
           run.trigger,
@@ -645,13 +684,14 @@ export async function sendUserMessage(
           messageId: message.id,
           role: "user",
           blocks: input.blocks,
+          author,
           // Carries the call id on the live event so a spoken turn groups into the
           // call card immediately, instead of after a refetch reads the nonce.
           callId: callIdFromClientNonce(message.clientNonce),
         },
       });
       return { message, task, run, busy, event };
-    });
+    }, THREAD_LOCK_TRANSACTION_OPTIONS);
   const committed = await commit().catch(async (error) => {
     const winner = await replay();
     if (winner) return { replay: winner } as const;
@@ -721,6 +761,8 @@ async function claimSteeringOnce(
     const steering = await tx.steeringMessage.findMany({
       where: {
         botId: input.botId,
+        // Only the run's own person's messages; anyone else's wait for a run of their own.
+        userId: run.userId,
         id: input.seenIds.length ? { notIn: input.seenIds } : undefined,
         // A routine or webhook turn only takes steering addressed to it; pending user messages
         // wait for the conversational continuation that starts once it finishes.
@@ -802,7 +844,7 @@ async function claimSteeringOnce(
               ? ("messaging" as const)
               : ("member" as const),
     }));
-  });
+  }, THREAD_LOCK_TRANSACTION_OPTIONS);
 }
 
 async function findPendingAsk(
@@ -858,7 +900,9 @@ async function commitAnswerRunInput(
       task: { select: { prompt: true } },
     },
   });
-  if (!run) return null;
+  // An answer resumes the run with its user's credentials and rules, so in a shared space only
+  // that user answers its cards; anyone else's message starts a run of their own.
+  if (!run || run.userId !== input.answeredByUserId) return null;
   const message = await tx.message.findFirst({
     where: {
       id: input.messageId,
@@ -878,9 +922,8 @@ async function commitAnswerRunInput(
   const choiceAsk = !approvalAsk && !secretAsk && Boolean(pendingAsk.actions?.length);
   const selectedChoice = choiceAsk ? resolveAskChoice(input.answer, pendingAsk.actions) : undefined;
   const dismissed = Boolean(input.dismiss);
-  // Only the run's user can turn down a secret request; every other card needs an answer.
-  if (dismissed && (!secretAsk || run.userId !== input.answeredByUserId || input.answer))
-    return null;
+  // A secret request can be turned down; every other card needs an answer.
+  if (dismissed && (!secretAsk || input.answer)) return null;
   const secretRequest = {
     runId: input.runId,
     spaceId: input.spaceId,
@@ -893,12 +936,6 @@ async function commitAnswerRunInput(
   )
     return null;
   if (secretAsk && !dismissed && !runSecretWriter) return null;
-  if (
-    secretAsk &&
-    (pendingAsk.credential || pendingAsk.oneTimeCode) &&
-    run.userId !== input.answeredByUserId
-  )
-    return null;
   // A code is answered as the page will take it; anything that is not a code is not stored.
   const code =
     secretAsk && !dismissed && pendingAsk.oneTimeCode
@@ -998,16 +1035,18 @@ async function commitAnswerRunInput(
       role: "user",
       blocks,
       botId: run.botId,
+      authorUserId: input.answeredByUserId,
       runId: input.runId,
       clientNonce: input.clientNonce,
     });
+    const author = await loadMessageAuthor(tx, input.answeredByUserId);
     await appendEventInTransaction(tx, {
       spaceId: input.spaceId,
       threadId: input.threadId,
       botId: run.botId,
       type: "thread.message.created",
       runId: input.runId,
-      payload: { messageId: utterance.id, role: "user", blocks, callId },
+      payload: { messageId: utterance.id, role: "user", blocks, callId, author },
     });
   }
 
@@ -1147,8 +1186,9 @@ export async function answerRunInput(
   runSecretWriter?: RunSecretWriter,
 ): Promise<boolean> {
   const commit = (writer = runSecretWriter) =>
-    prisma.$transaction(async (tx: Prisma.TransactionClient) =>
-      commitAnswerRunInput(tx, input, writer),
+    prisma.$transaction(
+      async (tx: Prisma.TransactionClient) => commitAnswerRunInput(tx, input, writer),
+      THREAD_LOCK_TRANSACTION_OPTIONS,
     );
   // Unwrapping space keys can wait on the key manager; keep that wait outside the transaction.
   await contentEncryptionOf(prisma)?.ring.all(input.spaceId);
@@ -1392,7 +1432,7 @@ export async function pauseRunForInput(
       continuationRunId,
       firstResponseRunId: response.firstResponse ? input.runId : undefined,
     };
-  });
+  }, THREAD_LOCK_TRANSACTION_OPTIONS);
 
   if (!committed) return false;
   await notifyCommittedEvent(
@@ -1417,7 +1457,7 @@ export async function pauseRunForTakeover(
     await tx.$queryRaw`SELECT id FROM threads WHERE id = ${input.threadId} FOR UPDATE`;
     const run = await tx.run.findUnique({
       where: { id: input.runId },
-      select: { checkpoint: true },
+      select: { checkpoint: true, userId: true },
     });
     const released = run?.checkpoint === "takeover" || run?.checkpoint === "takeover-skipped";
     const paused = await tx.run.updateMany({
@@ -1468,22 +1508,26 @@ export async function pauseRunForTakeover(
         controlBotId: true,
         controlLeaseId: true,
         controlLeaseExpiresAt: true,
+        controlUserId: true,
+        userId: true,
       },
     });
-    const activeUserLease = Boolean(
-      computer?.controlHolder === "user" &&
-        computer.controlLeaseId &&
-        computer.controlLeaseExpiresAt &&
-        computer.controlLeaseExpiresAt.getTime() > now.getTime(),
-    );
+    const activeUserLease = hasActiveComputerControl(computer, now);
     // Keep an active same-bot user lease so Skip / I'm done appear immediately.
     // Preserve another bot's active lease — computer/takeover owns revocation. Do not attach
     // this run to that lease: release validates controlBotId and could clear the binding without
     // resuming the waiting run. The requesting bot's takeover flow binds it after revocation.
     // Otherwise clear stale control, but bind controlRunId so takeoverRequested is true.
-    const retainControl = Boolean(activeUserLease && computer?.controlBotId === input.botId);
+    // In a shared Space the lease must also be this run's person's: another member's stays
+    // theirs, like another bot's, and never answers this run.
+    const retainControl = Boolean(
+      activeUserLease &&
+        computer?.controlBotId === input.botId &&
+        run &&
+        holdsUserControl(computer, run.userId),
+    );
     const preserveForeignLease = Boolean(
-      activeUserLease && computer?.controlBotId && computer.controlBotId !== input.botId,
+      activeUserLease && computer?.controlBotId && !retainControl,
     );
     const marked = await tx.computer.updateMany({
       where: { id: input.computerId, spaceId: input.spaceId },
@@ -1495,6 +1539,7 @@ export async function pauseRunForTakeover(
               state: "running",
               controlHolder: "none",
               controlLeaseId: null,
+              controlUserId: null,
               controlLeaseExpiresAt: null,
               controlBotId: null,
               controlRunId: input.runId,
@@ -1518,7 +1563,7 @@ export async function pauseRunForTakeover(
       where: { runId: input.runId, ...transientRunEventsWhere() },
     });
     return { threadId: waitingEvent.threadId, seq: waitingEvent.seq, continuationRunId: null };
-  });
+  }, THREAD_LOCK_TRANSACTION_OPTIONS);
 
   if (!committed) return false;
   if (committed.seq !== null) {
@@ -1577,6 +1622,7 @@ export async function finalizeComputerControlRelease(
       data: {
         controlHolder: input.holder,
         controlLeaseId: null,
+        controlUserId: null,
         controlLeaseExpiresAt: null,
         controlBotId: null,
         controlRunId: null,
@@ -1646,7 +1692,7 @@ export async function finalizeComputerControlRelease(
       },
     });
     return { threadId: event.threadId, seq: event.seq, runId };
-  });
+  }, THREAD_LOCK_TRANSACTION_OPTIONS);
 
   if (!committed) return false;
   if (committed.threadId && committed.seq !== null) {
@@ -1675,7 +1721,7 @@ export async function settleReleasedTakeoverCards(
   const seq = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.$queryRaw`SELECT id FROM threads WHERE id = ${input.threadId} FOR UPDATE`;
     return settleReleasedTakeoverCardsInTransaction(tx, input);
-  });
+  }, THREAD_LOCK_TRANSACTION_OPTIONS);
   if (seq !== null) await notify?.(input.threadId, seq);
 }
 
@@ -1726,7 +1772,10 @@ export async function appendEvent(
 ): Promise<ProductEvent> {
   // Concurrent writers in one thread (group members, bot messages) can deadlock on the thread row.
   const event = await withTransactionRetry(() =>
-    prisma.$transaction((tx: Prisma.TransactionClient) => appendEventInTransaction(tx, input)),
+    prisma.$transaction(
+      (tx: Prisma.TransactionClient) => appendEventInTransaction(tx, input),
+      THREAD_LOCK_TRANSACTION_OPTIONS,
+    ),
   );
   if (
     input.runId &&
@@ -1980,7 +2029,11 @@ export async function discardAnsweredSteering(
   });
 }
 
-/** Queue one follow-up when this bot still has unclaimed steering and no live run. */
+/**
+ * Queue one follow-up when this bot still has unclaimed steering and no live run. A Space being
+ * deleted gets it too: its messages were accepted, and the executor holds the run until the
+ * deletion ends or is called off.
+ */
 export async function createPendingSteeringRun(
   tx: Prisma.TransactionClient,
   input: { spaceId: string; threadId: string; botId: string },
@@ -2006,10 +2059,13 @@ export async function createPendingSteeringRun(
   if (pending.length === 0) return null;
   // One origin per continuation so a group channel and the owner's private chat are not answered
   // together. The app and the owner's direct line are one private conversation, answered first.
+  // One sender too: the run acts with that person's accounts, and the rest get their own
+  // continuation next.
   const origin = pending.some((item) => steeringOrigin(item) === "private")
     ? "private"
     : steeringOrigin(pending[0]!);
-  const batch = pending.filter((item) => steeringOrigin(item) === origin);
+  const userId = pending.find((item) => steeringOrigin(item) === origin)!.userId;
+  const batch = pending.filter((item) => steeringOrigin(item) === origin && item.userId === userId);
   const source = batch.at(-1)!;
   const modelPin = continuationModelPin(batch);
   const task = await tx.task.create({
@@ -2017,7 +2073,7 @@ export async function createPendingSteeringRun(
       spaceId: input.spaceId,
       botId: input.botId,
       threadId: input.threadId,
-      userId: batch[0]!.userId,
+      userId,
       prompt:
         origin === "webhook"
           ? blocksToAgentHistoryText(source.message.blocks as MessageBlock[])
@@ -2031,7 +2087,7 @@ export async function createPendingSteeringRun(
       botId: input.botId,
       threadId: input.threadId,
       taskId: task.id,
-      userId: batch[0]!.userId,
+      userId,
       status: "queued",
       // A private continuation is a follow-up the owner wrote only when every message in it came
       // from the app; one direct-line delivery keeps it messaging, so it is never owner-started.
@@ -2155,10 +2211,6 @@ export async function appendEventInTransaction(
       ).count === 1,
   );
   return { ...event, firstResponse };
-}
-
-function isRecordNotFound(error: unknown): boolean {
-  return Boolean(error && typeof error === "object" && "code" in error && error.code === "P2025");
 }
 
 /** Timing metadata is returned by the transaction that recorded first output. */

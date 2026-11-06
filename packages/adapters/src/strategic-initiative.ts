@@ -7,12 +7,18 @@ import {
   truncatePlainText,
 } from "@rakazo/core";
 import type { Prisma, PrismaClient } from "@rakazo/db";
-import { STRATEGIC_INITIATIVE_NONCE_PREFIX, spaceHasModelAccess } from "@rakazo/db";
+import {
+  isUniqueViolation,
+  memberHasModelAccess,
+  STRATEGIC_INITIATIVE_NONCE_PREFIX,
+  THREAD_LOCK_TRANSACTION_OPTIONS,
+} from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
-import { isUniqueViolation } from "./run-messages.js";
 import { modelCreditBillingEnabled } from "./run-model.js";
 
 const STRATEGIC_INITIATIVE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// A failed check-in usually means the bot's model setup is broken; retrying daily only repeats it.
+const FAILED_CHECK_IN_BACKOFF_MS = 7 * STRATEGIC_INITIATIVE_INTERVAL_MS;
 const STALE_SCRATCHPAD_ITEM_MS = 12 * 60 * 60 * 1000;
 const MAX_ITEMS_IN_PROMPT = 5;
 const MAX_STALE_ITEMS_SCANNED = 50;
@@ -51,6 +57,11 @@ function strategicBotEligibility(now: Date): Prisma.BotWhereInput {
           {
             clientNonce: { startsWith: `${STRATEGIC_INITIATIVE_NONCE_PREFIX}:` },
             createdAt: { gt: new Date(now.getTime() - STRATEGIC_INITIATIVE_INTERVAL_MS) },
+          },
+          {
+            clientNonce: { startsWith: `${STRATEGIC_INITIATIVE_NONCE_PREFIX}:` },
+            status: "failed",
+            createdAt: { gt: new Date(now.getTime() - FAILED_CHECK_IN_BACKOFF_MS) },
           },
         ],
       },
@@ -147,17 +158,19 @@ export async function reconcileStrategicInitiatives(deps: {
     if (bots.length === 0) break;
     cursor = bots[bots.length - 1]!.id;
     for (const bot of bots) {
-      const membership = await deps.prisma.spaceMember.findUnique({
-        where: { spaceId_userId: { spaceId: bot.spaceId, userId: bot.userId } },
-        select: { id: true },
-      });
-      if (!membership) continue;
-      if (deps.billingEnabled && !(await spaceHasModelAccess(deps.prisma, bot.spaceId))) continue;
+      // The free checks first, so a bot with nothing to plan costs no queries.
       if (!bot.thread) continue;
       const scratchpadItems = bot.scratchpadItems
         .filter((item) => !bot.routines.some((routine) => item.notes.includes(routine.id)))
         .slice(0, MAX_ITEMS_IN_PROMPT);
       if (scratchpadItems.length === 0) continue;
+      const membership = await deps.prisma.spaceMember.findUnique({
+        where: { spaceId_userId: { spaceId: bot.spaceId, userId: bot.userId } },
+        select: { id: true },
+      });
+      if (!membership) continue;
+      // The bot's person pays: a guest's run is decided by their own plan, not the space's.
+      if (deps.billingEnabled && !(await memberHasModelAccess(deps.prisma, bot))) continue;
       const runId = await queueStrategicInitiativeRun(deps, { ...bot, scratchpadItems }, deps.now);
       if (!runId) continue;
       queued += 1;
@@ -276,7 +289,7 @@ async function queueStrategicInitiativeRun(
         select: { id: true },
       });
       return run.id;
-    });
+    }, THREAD_LOCK_TRANSACTION_OPTIONS);
   } catch (error) {
     if (isUniqueViolation(error)) return null;
     throw error;

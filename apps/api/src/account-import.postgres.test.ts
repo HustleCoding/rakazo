@@ -12,10 +12,16 @@ import { LocalAgentHomeStore } from "@rakazo/adapters";
 import type { AccountExportRecord, Actor } from "@rakazo/contracts";
 import { PAGE_SOURCE_MAX_BYTES } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
-import { asSystem, createDb } from "@rakazo/db";
+import { asSystem, createDb, createOrganizationForUser } from "@rakazo/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AccountImportError, importAccount } from "./account-import.js";
-import { buildArchive, chunked, exportFiles, manifestFor } from "./account-import.test-support.js";
+import {
+  buildArchive,
+  chunked,
+  exportFiles,
+  incompressibleBytes,
+  manifestFor,
+} from "./account-import.test-support.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const describePostgres =
@@ -53,6 +59,7 @@ function sourceRecords(): AccountExportRecord[] {
       crossSpaceCommunication: false,
       dailyCheckIns: false,
       fleetManagement: false,
+      replyMode: "messages",
       createdAt: at,
     },
     {
@@ -81,6 +88,7 @@ function sourceRecords(): AccountExportRecord[] {
       crossSpaceCommunication: false,
       dailyCheckIns: false,
       fleetManagement: true,
+      replyMode: "chat",
       createdAt: at,
     },
     {
@@ -329,7 +337,7 @@ describePostgres("account import (PostgreSQL)", () => {
         },
       ]),
     );
-  const runImport = (bytes: Uint8Array) =>
+  const runImport = (bytes: Uint8Array, importer = actor) =>
     importAccount(
       {
         prisma,
@@ -340,7 +348,7 @@ describePostgres("account import (PostgreSQL)", () => {
         dataDir: root,
         maxArtifactBytes: 1024 * 1024,
       },
-      actor,
+      importer,
       chunked(bytes),
     );
   const ownedSpaceIds = async () =>
@@ -387,7 +395,9 @@ describePostgres("account import (PostgreSQL)", () => {
 
   afterAll(async () => {
     if (!db) return;
-    await system.organization.deleteMany({ where: { id: organizationId } });
+    await system.organization.deleteMany({
+      where: { OR: [{ id: organizationId }, { members: { some: { userId } } }] },
+    });
     await system.user.deleteMany({ where: { id: userId } });
     await rm(root, { recursive: true, force: true });
     await db.prisma.$disconnect();
@@ -419,6 +429,7 @@ describePostgres("account import (PostgreSQL)", () => {
     expect(child.parentBotId).toBe(parent.id);
     expect(child.pinned).toBe(true);
     expect(child.fleetManagement).toBe(false);
+    expect(child.replyMode).toBe("messages");
     expect(child.dailyCheckIns).toBe(false);
     expect(parent.dailyCheckIns).toBe(false);
     expect(child.disabledBuiltinTools).toEqual(["browser"]);
@@ -534,6 +545,45 @@ describePostgres("account import (PostgreSQL)", () => {
     expect(firstBots).toHaveLength(2);
     expect(secondBots).toHaveLength(2);
     expect(firstBots.filter((id) => secondBots.includes(id))).toEqual([]);
+  });
+
+  it("imports a nested zip home file byte-for-byte", async () => {
+    const inner = buildArchive([
+      ["f0.bin", incompressibleBytes(64 * 1024)],
+      ["f1.bin", incompressibleBytes(64 * 1024)],
+      ["f2.bin", incompressibleBytes(64 * 1024)],
+      ["f3.bin", incompressibleBytes(64 * 1024)],
+    ]);
+    const result = await runImport(
+      buildArchive(
+        exportFiles(manifestFor([{ id: "src-space", name: "Nested" }]), [
+          {
+            id: "src-space",
+            records: sourceRecords(),
+            homes: [["src-bot-child", "archive.zip", inner]],
+          },
+        ]),
+      ),
+    );
+    const spaceId = result.spaces[0]!.id;
+    const child = await system.bot.findFirstOrThrow({
+      where: { spaceId, name: "Scout" },
+      include: { computer: true },
+    });
+    const files = new Map<string, Uint8Array>();
+    for await (const file of home.exportHome(child.computer!.homeKey, context, {
+      directory: `bots/${child.id}`,
+    }))
+      files.set(file.path, file.content);
+    expect(Buffer.from(files.get("archive.zip")!)).toEqual(Buffer.from(inner));
+  });
+
+  it("imports into the importer's current organization", async () => {
+    const work = await createOrganizationForUser(system, { userId, name: "Work" });
+    const result = await runImport(archive(), { ...actor, spaceId: work.defaultSpaceId });
+    await expect(
+      system.space.findUniqueOrThrow({ where: { id: result.spaces[0]!.id } }),
+    ).resolves.toMatchObject({ organizationId: work.id });
   });
 
   it("leaves out an artifact the export could not read, with its versions", async () => {

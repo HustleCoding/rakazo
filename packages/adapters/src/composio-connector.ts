@@ -14,6 +14,7 @@ import type {
   ManagedConnectorProvider,
 } from "@rakazo/adapter-kit";
 import { ConnectorAuthUnavailableError } from "@rakazo/adapter-kit";
+import { humanizeToolName } from "@rakazo/core";
 import { getLogger } from "@rakazo/logging";
 import { COMPOSIO_MULTI_EXECUTE_TOOL, composioToolBatch } from "./composio-batch.js";
 import type { ToolkitDirectoryEntry } from "./composio-catalog-cache.js";
@@ -71,6 +72,7 @@ function mapOneTool(item: unknown): ConnectorTool | undefined {
       description: String(fn.description ?? name),
       inputSchema: asObject(fn.parameters) ?? { type: "object", properties: {} },
       batch: composioToolBatch(name),
+      ...composioToolLabel(name),
       route: { connectorId: "composio", toolName: name },
     };
   }
@@ -83,7 +85,26 @@ function mapOneTool(item: unknown): ConnectorTool | undefined {
       asObject(raw.inputSchema) ??
       asObject(raw.parameters) ?? { type: "object", properties: {} },
     batch: composioToolBatch(name),
+    ...composioToolLabel(name),
     route: { connectorId: "composio", toolName: name },
+  };
+}
+
+const COMPOSIO_TOOL_PREFIX = "COMPOSIO_";
+const COMPOSIO_TOOL_LABELS: Record<string, string> = {
+  COMPOSIO_SEARCH_TOOLS: "Searching your apps",
+  COMPOSIO_GET_TOOL_SCHEMAS: "Checking app details",
+  COMPOSIO_MULTI_EXECUTE_TOOL: "Using your apps",
+  COMPOSIO_REMOTE_WORKBENCH: "Running code",
+  COMPOSIO_REMOTE_BASH_TOOL: "Running code",
+  COMPOSIO_MANAGE_CONNECTIONS: "Checking connections",
+};
+
+/** Session tools carry the vendor's name, which means nothing to the person watching. */
+function composioToolLabel(name: string): { label?: string } {
+  if (!name.startsWith(COMPOSIO_TOOL_PREFIX)) return {};
+  return {
+    label: COMPOSIO_TOOL_LABELS[name] ?? humanizeToolName(name.slice(COMPOSIO_TOOL_PREFIX.length)),
   };
 }
 
@@ -582,7 +603,7 @@ export class ComposioConnector implements ComposioProvider {
           const logIds = collectLogIds(executed);
           yield {
             type: "error",
-            message: sanitizeComposioError(composioResultError(result.error, result.data)),
+            message: sanitizeIntegrationError(composioResultError(result.error, result.data)),
             ...(logIds.length > 0 ? { logIds } : {}),
           };
           return;
@@ -607,7 +628,7 @@ export class ComposioConnector implements ComposioProvider {
       const logIds = collectLogIds(executed);
       yield {
         type: "error",
-        message: sanitizeComposioError(error),
+        message: sanitizeIntegrationError(error),
         ...(logIds.length > 0 ? { logIds } : {}),
       };
     }
@@ -638,9 +659,9 @@ export class ComposioConnector implements ComposioProvider {
         return { authorizationUrl: null, state: request.provider };
       }
       if (isNoManagedAuthError(error)) {
-        throw new ConnectorAuthUnavailableError({ cause: sanitizeComposioError(error) });
+        throw new ConnectorAuthUnavailableError({ cause: sanitizeIntegrationError(error) });
       }
-      throw new Error(sanitizeComposioError(error));
+      throw new Error(sanitizeIntegrationError(error));
     }
   }
 
@@ -876,7 +897,7 @@ export class ConnectorRegistry implements ConnectorProvider {
         try {
           return [connectorId, await provider.discoverTools(context)] as const;
         } catch (error) {
-          getLogger().error("connector discovery failed", sanitizeComposioError(error), {
+          getLogger().error("connector discovery failed", sanitizeIntegrationError(error), {
             "connector.id": connectorId,
           });
           return [connectorId, []] as const;
@@ -1059,7 +1080,7 @@ export function composioResultError(summary: string, data: unknown): string {
   return `${summary}: ${shown.join("; ")}${more > 0 ? `; +${more} more` : ""}`;
 }
 
-export function sanitizeComposioError(error: unknown): string {
+export function sanitizeIntegrationError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return redactConnectorText(message);
 }

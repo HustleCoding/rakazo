@@ -1,3 +1,4 @@
+import type { ComputerSize } from "@rakazo/contracts";
 import type {
   AdapterContext,
   AdapterDescriptor,
@@ -11,6 +12,7 @@ import type {
   BackgroundJob,
   BackgroundJobHandlers,
   BillingByokCheckoutRequest,
+  BillingByokPlan,
   BillingCheckoutRequest,
   BillingCreditCheckoutRequest,
   BillingCreditPurchase,
@@ -102,6 +104,8 @@ export interface SandboxProvider {
   ownsReference?(computer: Pick<ComputerRef, "kind" | "providerRef">): boolean;
   /** True when every running minute is billed, so the active-lifetime cap applies. */
   billsWhileRunning?(computer: Pick<ComputerRef, "kind">): boolean;
+  /** Whether the provider running this computer keeps its disk when it stops. */
+  keepsHome?(computer: ComputerRef): Promise<boolean>;
   describe(): AdapterDescriptor<SandboxCapabilities>;
   /** Workspace directory operations for hosts without the standard Unix command tools. */
   workspaceDirectories?(
@@ -133,6 +137,12 @@ export interface SandboxProvider {
        * reports it gone instead, so the newer save wins.
        */
       savedAt?: Date;
+      /**
+       * The size to start at. A computer already running keeps its size; without one, a stopped
+       * computer resumes at its current size and a new one starts at the standard size. A size
+       * the provider cannot move to throws `SandboxSizeUnavailableError`.
+       */
+      size?: ComputerSize;
     },
     context: AdapterContext,
   ): Promise<ComputerRef>;
@@ -495,15 +505,16 @@ export interface BillingProvider {
   /** Ends the customer's running trial now and bills the first period; a no-op without one. */
   endTrial?(customerId: string): Promise<void>;
   /**
-   * Moves the customer's live monthly own-key subscription `subscriptionId` to `amountCents` a
-   * year, charging the difference now less the unused part of the month. A failed payment leaves
-   * the plan unchanged. Returns false without charging when that subscription is no longer an active
-   * or trialing monthly own-key plan, is set to cancel, or monthly credits have started.
+   * Moves the customer's own-key subscription `subscriptionId` from plan `from` to plan `to`,
+   * billing the prorated difference now: a change of interval restarts the period today, crediting
+   * its unused part. A failed payment leaves the plan unchanged. Returns false without charging
+   * when that subscription is no longer an active or trialing `from` plan, is set to cancel, or
+   * monthly credits have started.
    */
-  switchByokToYearly?(
+  changeByokPlan?(
     customerId: string,
     subscriptionId: string,
-    amountCents: number,
+    change: { from: BillingByokPlan; to: BillingByokPlan },
   ): Promise<boolean>;
   /** Ends every live own-key plan at its period end. */
   endByokPlans?(customerId: string): Promise<void>;
@@ -516,6 +527,8 @@ export interface BillingProvider {
   getPrice(): Promise<BillingPrice>;
   createCustomer(input: { email: string; organizationId: string }): Promise<{ customerId: string }>;
   createCheckout(input: BillingCheckoutRequest): Promise<{ url: string }>;
+  /** Expires every open checkout session of the customer; resolves once none can be paid. */
+  expireOpenCheckouts(customerId: string): Promise<void>;
   createPortal(input: { customerId: string; returnUrl: string }): Promise<{ url: string }>;
   /** Current subscription for the customer, preferring one that grants access. */
   getCustomerSubscription(customerId: string): Promise<BillingSubscriptionSnapshot | null>;
@@ -534,7 +547,12 @@ export interface ExecutionRunner {
 export interface VoiceProvider {
   describe(): AdapterDescriptor<VoiceCapabilities>;
   verify(apiKey: string, context: AdapterContext): Promise<VoiceVerifyResult>;
-  listVoices(apiKey: string, context: AdapterContext): Promise<VoiceInfo[]>;
+  /** `options.language` narrows the listing for providers that advertise `languages`. */
+  listVoices(
+    apiKey: string,
+    context: AdapterContext,
+    options?: { language?: string },
+  ): Promise<VoiceInfo[]>;
   synthesize(request: VoiceSynthesizeRequest, context: AdapterContext): Promise<SpeechClip>;
   transcribe?(request: VoiceTranscribeRequest, context: AdapterContext): Promise<{ text: string }>;
 }
