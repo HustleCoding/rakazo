@@ -63,7 +63,8 @@ import {
 import { useComposerLayout } from "./use-composer-layout";
 
 const ATTACHMENT_ACCEPT = attachmentPickerAccept(navigator.userAgent);
-const COMPOSER_TEXT = "rk-scroll whitespace-pre-wrap break-words px-0.5 py-0.5 text-body1";
+const COMPOSER_TEXT =
+  "rk-scroll whitespace-pre-wrap break-words px-0.5 py-0.5 text-body1 pointer-coarse:text-base";
 const ComposerBody = memo(function Composer({
   artifactTarget,
   activeName,
