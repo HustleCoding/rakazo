@@ -704,7 +704,7 @@ export function RoutineEditor({
           ) : null}
 
           {editing?.active && editing.nextRunAt ? (
-            <p data-testid="routine-next-run" className="text-xs text-muted-foreground">
+            <p data-testid="routine-next-run" className="text-body-sm text-muted-foreground">
               <Trans>Next run</Trans>{" "}
               <time dateTime={editing.nextRunAt}>
                 {new Date(editing.nextRunAt).toLocaleString(i18n.locale || "en", {
