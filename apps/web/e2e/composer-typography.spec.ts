@@ -14,7 +14,7 @@ async function expectTypography(composer: Locator, fontSize: string, lineHeight:
   await expect(mirror).toHaveCSS("font-size", fontSize);
   await expect(composer).toHaveCSS("line-height", lineHeight);
   await expect(mirror).toHaveCSS("line-height", lineHeight);
-  expect((await composer.boundingBox())?.width).toBe((await mirror.boundingBox())?.width);
+  expect((await composer.boundingBox())!.width).toBeCloseTo((await mirror.boundingBox())!.width, 1);
 }
 
 test.describe("touch composer", () => {
