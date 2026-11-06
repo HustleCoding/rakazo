@@ -27,7 +27,10 @@ test.describe("touch composer", () => {
     const viewport = await page.locator('meta[name="viewport"]').getAttribute("content");
     expect(viewport).not.toMatch(/user-scalable\s*=\s*(no|0)|maximum-scale\s*=/i);
 
-    for (const size of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
+    for (const size of [
+      { width: 390, height: 844 },
+      { width: 844, height: 390 },
+    ]) {
       await page.setViewportSize(size);
       await composer.fill("A draft to check the mobile text and caret.");
       await expectTypography(composer, "16px", "24px");
