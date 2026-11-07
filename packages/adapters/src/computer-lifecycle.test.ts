@@ -12,10 +12,12 @@ import type {
 import {
   SandboxAllowanceUsedError,
   SandboxDamagedError,
+  SandboxSizeUnavailableError,
   SandboxUnresponsiveError,
 } from "@rakazo/adapter-kit";
+import type * as Db from "@rakazo/db";
 import type { PrismaClient, ThreadEvents } from "@rakazo/db";
-import { clearThread } from "@rakazo/db";
+import { clearThread, planComputerSize } from "@rakazo/db";
 import { describe, expect, it, vi } from "vitest";
 import {
   acquireComputerExecutionLease,
@@ -34,6 +36,12 @@ import { checkpointComputerWorkspace } from "./computer-workspace.js";
 import { FakeSandboxProvider } from "./fake-sandbox.js";
 import { LocalAgentHomeStore } from "./home.js";
 import { SandboxUnsafeStopError } from "./sandbox-errors.js";
+
+// The plan's size is read from billing, which these Prisma doubles do not model.
+vi.mock("@rakazo/db", async (importOriginal) => ({
+  ...(await importOriginal<typeof Db>()),
+  planComputerSize: vi.fn(async () => "standard"),
+}));
 
 const context = {
   operationId: "test",
@@ -1984,6 +1992,30 @@ describe("Team Computer wake", () => {
     expect(harness.sandbox.provision).not.toHaveBeenCalled();
   });
 
+  it("starts the computer at the size its plan provides", async () => {
+    const harness = wakeHarness("stopped");
+    vi.mocked(planComputerSize).mockResolvedValueOnce("large");
+
+    await boot(harness);
+
+    expect(planComputerSize).toHaveBeenLastCalledWith(harness.prisma, expect.any(String));
+    expect(harness.sandbox.provision).toHaveBeenCalledOnce();
+    expect(vi.mocked(harness.sandbox.provision).mock.calls[0]![0].size).toBe("large");
+  });
+
+  it("starts the computer at the size it has when the provider cannot move it", async () => {
+    const harness = wakeHarness("stopped");
+    vi.mocked(harness.sandbox.provision).mockRejectedValueOnce(
+      new SandboxSizeUnavailableError("too_small"),
+    );
+
+    await expect(boot(harness)).resolves.toMatchObject({ providerRef: "sandbox-1" });
+
+    const sizes = vi.mocked(harness.sandbox.provision).mock.calls.map(([request]) => request.size);
+    expect(sizes).toEqual(["standard", undefined]);
+    expect(activation(harness)?.state).toBe("running");
+  });
+
   it("starts the active-lifetime clock when a stopped computer starts", async () => {
     const harness = wakeHarness("stopped", undefined, {}, { runningSince: null });
     const before = Date.now();
@@ -2795,6 +2827,9 @@ describe("computer replacement", () => {
       .mockResolvedValue({ count: 1 });
     const update = vi.fn().mockResolvedValue({});
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow,
         updateMany,
@@ -2843,6 +2878,9 @@ describe("computer replacement", () => {
 
   it("rejects replacement while another team bot holds the computer", async () => {
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow: vi.fn().mockResolvedValue({
           id: "computer-1",
@@ -2921,6 +2959,9 @@ describe("computer replacement", () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 0 });
     const stale = new Date("2024-01-01T00:00:00.000Z");
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow: vi.fn().mockResolvedValue({
           id: "computer-1",
@@ -3044,6 +3085,9 @@ describe("computer replacement", () => {
     // reach the claim instead of answering "Computer is busy" for good.
     const updateMany = vi.fn().mockResolvedValue({ count: 0 });
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow: vi.fn().mockResolvedValue({
           id: "computer-1",
@@ -3205,6 +3249,9 @@ describe("computer replacement", () => {
 
   it("rejects replacement while the target bot has an active run", async () => {
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow: vi.fn().mockResolvedValue({
           id: "computer-1",
@@ -3338,6 +3385,9 @@ describe("computer replacement", () => {
         controlBotId: null,
       });
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow,
         updateMany,
@@ -3376,6 +3426,9 @@ describe("computer replacement", () => {
     const destroy = vi.fn();
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow: vi.fn().mockResolvedValue(idleTakeoverComputer()),
         updateMany,
@@ -3429,6 +3482,9 @@ describe("computer replacement", () => {
   it("does not revoke the screen when the reset claim loses", async () => {
     const setScreenControl = vi.fn();
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow: vi.fn().mockResolvedValue(idleTakeoverComputer()),
         updateMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -3560,6 +3616,9 @@ describe("computer replacement", () => {
 
   it("rejects replacement when control is claimed before the suspending lock", async () => {
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow: vi.fn().mockResolvedValue({
           id: "computer-1",
@@ -3613,6 +3672,9 @@ describe("computer replacement", () => {
       .mockResolvedValueOnce({ count: 1 })
       .mockResolvedValueOnce({ count: 1 });
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow: vi.fn().mockResolvedValue({
           id: "computer-1",
@@ -3666,6 +3728,9 @@ describe("computer replacement", () => {
       .mockResolvedValueOnce({ count: 1 })
       .mockResolvedValueOnce({ count: 1 });
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow: vi.fn().mockResolvedValue({
           id: "computer-1",
@@ -3744,6 +3809,9 @@ describe("computer replacement", () => {
         updatedAt: new Date("2024-01-01T00:00:00.000Z"),
       });
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: { findUniqueOrThrow, updateMany, update },
       run: { findFirst: vi.fn().mockResolvedValue(null) },
     } as unknown as PrismaClient;
@@ -3777,6 +3845,9 @@ describe("computer replacement", () => {
 
   it("rejects a second claim on a stopped computer that is already suspending", async () => {
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow: vi.fn().mockResolvedValue({
           id: "computer-1",
@@ -3841,6 +3912,9 @@ describe("computer replacement", () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const update = vi.fn().mockResolvedValue({});
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow,
         updateMany,
@@ -3902,6 +3976,9 @@ describe("computer replacement", () => {
     };
     const updateMany = vi.fn().mockResolvedValueOnce({ count: 1 }).mockResolvedValue({ count: 1 });
     const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      $queryRaw: vi.fn(async () => []),
+      space: { findUnique: vi.fn(async () => null) },
       computer: {
         findUniqueOrThrow: vi.fn().mockResolvedValue(computerRecord),
         findFirst: vi

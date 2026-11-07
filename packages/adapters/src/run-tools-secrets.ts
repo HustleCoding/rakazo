@@ -1,7 +1,7 @@
 import { runContinueJob } from "@rakazo/adapter-kit";
 import { BotSecretName, botSecretSubmissionSchema } from "@rakazo/contracts";
 import { createStreamingRedactor, displayName } from "@rakazo/core";
-import { runCodeKind, runLoginKind, runSecretKind } from "@rakazo/db";
+import { runCodeKind, runLoginKind, runSecretKind, spaceIsShared } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import {
   completeExternalEffect,
@@ -46,7 +46,7 @@ import type { ToolHandlers } from "./run-tool-gate.js";
 export const secretTools: ToolHandlers = {
   async list_secrets(ctx) {
     const { deps, run } = ctx;
-    return listBotSecrets(deps.prisma, run);
+    return listBotSecrets(deps.prisma, deps.secretStore, run);
   },
   async forget_secret(ctx, call) {
     const { deps, run } = ctx;
@@ -363,6 +363,9 @@ export const secretTools: ToolHandlers = {
           ...(codeOrigin ? { oneTimeCode: { origin: codeOrigin } } : {}),
           ...(replaces ? { replaces } : {}),
           ...(loginFields?.labels ? { loginFields: loginFields.labels } : {}),
+          ...(loginFields && (await spaceIsShared(deps.prisma, run.spaceId))
+            ? { sharedBrowser: true as const }
+            : {}),
           purpose: codeOrigin
             ? "otp"
             : normalizeSecretAskPurpose(args.purpose ? String(args.purpose) : undefined),

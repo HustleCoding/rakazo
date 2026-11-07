@@ -63,7 +63,7 @@ export async function pollCloudAgent(
         select: { id: true },
       }),
       deps.prisma.bot.findFirst({
-        where: { id: agent.botId, spaceId: agent.spaceId, userId: agent.userId, archivedAt: null },
+        where: { id: agent.botId, spaceId: agent.spaceId, archivedAt: null },
       }),
     ]);
     const abandoned = !card || !member || !bot;
@@ -290,7 +290,6 @@ async function finishPoll(
       where: {
         id: agent.threadId,
         spaceId: agent.spaceId,
-        userId: agent.userId,
       },
       data: { nextEventSeq: { increment: 0 } },
     });
@@ -308,7 +307,7 @@ async function finishPoll(
         select: { id: true },
       }),
       tx.bot.findFirst({
-        where: { id: agent.botId, spaceId: agent.spaceId, userId: agent.userId, archivedAt: null },
+        where: { id: agent.botId, spaceId: agent.spaceId, archivedAt: null },
         select: { id: true },
       }),
     ]);

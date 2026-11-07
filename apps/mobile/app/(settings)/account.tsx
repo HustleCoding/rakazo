@@ -1,6 +1,6 @@
 import { MenuView } from "@expo/ui/community/menu";
 import type { AccountSecurity, UsageSummary } from "@rakazo/contracts";
-import { accountDisplay, displayName } from "@rakazo/core";
+import { APP_LOCALE_LABELS, accountDisplay, displayName } from "@rakazo/core";
 import * as Notifications from "expo-notifications";
 import type { Href } from "expo-router";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
@@ -29,6 +29,7 @@ import {
   SettingsSwitch,
   useStackedSettings,
 } from "../../components/settings-group";
+import { SpendingLimitRow, useSpendingStatus } from "../../components/spending-limit-row";
 import { createAccountNameEditor } from "../../lib/account-name-editor";
 import type { MobileMe } from "../../lib/api";
 import {
@@ -50,6 +51,13 @@ import {
 import { useApprovalSettings } from "../../lib/approval-settings";
 import { archivedChatCounts, loadArchivedChats } from "../../lib/archived-chats";
 import { replaceWithSignIn } from "../../lib/auth-routing";
+import { endCallBeforeSessionEnd } from "../../lib/call-session";
+import {
+  getHapticsEnabled,
+  loadHapticsPreference,
+  setHapticsEnabled,
+  subscribeHaptics,
+} from "../../lib/haptics";
 import { dateLocaleForUi, useI18n } from "../../lib/i18n";
 import type { LiveNotificationSettings } from "../../lib/live-notifications";
 import {
@@ -62,6 +70,7 @@ import {
   setLiveNotificationSettings,
 } from "../../lib/live-notifications";
 import { native, useResolvedAppearance, useThemedStyles } from "../../lib/native";
+import { activeOrganization, useOrganizations } from "../../lib/organizations";
 import type { MobilePasskey } from "../../lib/passkey";
 import {
   addPasskey,
@@ -92,8 +101,10 @@ import {
   removeTrustedLinkSite,
   useTrustedLinkSites,
 } from "../../lib/trusted-link-sites";
-import { UI_LOCALE_LABELS } from "../../lib/ui-locale";
+import { confirmUnsentSendLoss } from "../../lib/unsent-send-warning";
 import { errorText } from "../../lib/user-error";
+
+let hapticsSaveVersion = 0;
 
 export default function Account() {
   const sideInsets = useSideInsets();
@@ -101,6 +112,7 @@ export default function Account() {
   const router = useRouter();
   const { focus } = useLocalSearchParams<{ focus?: string }>();
   const [me, setMe] = useState<MobileMe | null>(null);
+  const botStyleRequest = useRef(0);
   const account = accountDisplay(me ?? {}, t("Your account"));
   const [nameDialogOpen, setNameDialogOpen] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
@@ -133,6 +145,8 @@ export default function Account() {
   const deletion = useAccountDeletion({ onSecurity: setSecurity });
   const { run: securityAction } = deletion;
   const [signingOut, setSigningOut] = useState(false);
+  // Held from the tap, so a second tap while the unsent-message check runs starts nothing.
+  const signOutStarted = useRef(false);
   const pending = deletion.pending || signingOut;
   const [notifications, setNotifications] = useState<LiveNotificationSettings>(
     DEFAULT_LIVE_NOTIFICATION_SETTINGS,
@@ -177,6 +191,28 @@ export default function Account() {
     getCachedRemoteImagesEnabled,
     () => false,
   );
+  const hapticsEnabled = useSyncExternalStore(
+    subscribeHaptics,
+    getHapticsEnabled,
+    getHapticsEnabled,
+  );
+  function updateHaptics(value: boolean) {
+    const version = ++hapticsSaveVersion;
+    const isCurrent = () => version === hapticsSaveVersion && getHapticsEnabled() === value;
+    void setHapticsEnabled(value).catch(() => {
+      if (!isCurrent()) return;
+      Alert.alert(t("Haptics"), t("Could not save"), [
+        { text: t("Cancel"), style: "cancel" },
+        {
+          text: t("Retry"),
+          onPress: () => {
+            if (isCurrent()) updateHaptics(value);
+          },
+        },
+      ]);
+    });
+  }
+
   const loadRemoteImagesLabel = t("Load web images automatically");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const stackOptions = useStackedSettings();
@@ -185,6 +221,8 @@ export default function Account() {
   const updateLabel = formatUpdateLabel(versionInfo.update, t);
   const versionAccessibility = [versionInfo.nativeLabel, updateLabel].filter(Boolean).join(". ");
   const approvals = useApprovalSettings(ACCOUNT_SETTINGS);
+  const spending = useSpendingStatus();
+  const organizations = useOrganizations().data;
   const settingsLink = ({ title, href }: { title: string; href: Extract<Href, string> }) => (
     <SettingsRow
       key={href}
@@ -274,6 +312,7 @@ export default function Account() {
 
   useFocusEffect(
     useCallback(() => {
+      void loadHapticsPreference();
       void loadTrustedLinkSites().catch(() => undefined);
     }, []),
   );
@@ -318,14 +357,23 @@ export default function Account() {
   );
 
   async function handleSignOut() {
+    if (signOutStarted.current) return;
+    signOutStarted.current = true;
+    if (!(await confirmUnsentSendLoss("sign-out"))) {
+      signOutStarted.current = false;
+      return;
+    }
     setSigningOut(true);
     setSignOutError(null);
     try {
+      // Hang up while the session still exists, so the server records the call's end.
+      await endCallBeforeSessionEnd();
       await signOut();
       replaceWithSignIn();
     } catch (err) {
       setSignOutError(errorText(err, t("Could not sign out")));
       setSigningOut(false);
+      signOutStarted.current = false;
     }
   }
 
@@ -443,6 +491,19 @@ export default function Account() {
           />
           {focus !== "usage" ? usageBlock : null}
         </SettingsGroup>
+
+        {organizations ? (
+          <SettingsGroup>
+            <SettingsRow
+              key="organization"
+              accessibilityRole="button"
+              chevron="right"
+              onPress={() => router.push("/organization")}
+              title={t("Organization")}
+              value={activeOrganization(organizations)?.name}
+            />
+          </SettingsGroup>
+        ) : null}
 
         {(security?.sso && !security.ssoLinked) || canChangePassword ? (
           <SettingsGroup>
@@ -563,16 +624,52 @@ export default function Account() {
           />
         </View>
 
+        {me?.botAvatarSet ? (
+          <View accessibilityLabel={t("Bot style")} style={styles.section}>
+            <SettingsLabel>{t("Bot style")}</SettingsLabel>
+            <NativeSegmentedControl
+              accessibilityLabel={t("Bot style")}
+              onChange={(botAvatarSet) => {
+                const previous = me.botAvatarSet;
+                // Only the latest tap's reply may land, so a slower earlier save can't undo it.
+                const request = ++botStyleRequest.current;
+                setMe((current) => (current ? { ...current, botAvatarSet } : current));
+                rpc("preferences/update", { botAvatarSet })
+                  .then((next) => {
+                    // Take only the style, so an older snapshot can't undo another edit.
+                    if (request !== botStyleRequest.current) return;
+                    setMe((current) =>
+                      current ? { ...current, botAvatarSet: next.botAvatarSet } : next,
+                    );
+                  })
+                  .catch(() => {
+                    if (request !== botStyleRequest.current) return;
+                    setMe((current) =>
+                      current ? { ...current, botAvatarSet: previous } : current,
+                    );
+                    Alert.alert(t("Couldn't update bot style"));
+                  });
+              }}
+              options={[
+                { value: "organic", label: t("Original") },
+                { value: "rakazo", label: t("Rakazo") },
+              ]}
+              value={me.botAvatarSet}
+            />
+          </View>
+        ) : null}
+
         <SettingsGroup>
           <SettingsRow
             accessibilityRole="button"
             accessibilityLabel={t("Language")}
-            accessibilityValue={{ text: UI_LOCALE_LABELS[locale] }}
+            accessibilityValue={{ text: APP_LOCALE_LABELS[locale] }}
             chevron="right"
             onPress={() => router.push("/language")}
             title={t("Language")}
-            value={UI_LOCALE_LABELS[locale]}
+            value={APP_LOCALE_LABELS[locale]}
           />
+          <SettingsSwitch label={t("Haptics")} value={hapticsEnabled} onChange={updateHaptics} />
         </SettingsGroup>
 
         {Platform.OS === "android" ? (
@@ -641,6 +738,21 @@ export default function Account() {
               onPress={() => router.push("/billing")}
             />
           ) : null}
+          {me ? (
+            <SettingsRow
+              accessibilityRole="button"
+              chevron="right"
+              disabled={pending}
+              // The space header holds Members too, but a single space has no header.
+              onPress={() =>
+                openFromSettingsSheet(router, {
+                  pathname: "/space-members",
+                  params: { spaceId: selectedSpaceId() ?? me.spaceId },
+                })
+              }
+              title={t("Members")}
+            />
+          ) : null}
           {(
             [
               ...(me?.ticketBoardEnabled ? [{ title: t("Board"), href: "/board" } as const] : []),
@@ -658,6 +770,9 @@ export default function Account() {
               onPress={() => router.push("/approvals")}
             />
           ) : null}
+          {spending?.shown ? (
+            <SpendingLimitRow key="spending-limit" status={spending} disabled={pending} />
+          ) : null}
           {(
             [
               { title: t("Vault"), href: "/vault" },
@@ -666,6 +781,7 @@ export default function Account() {
                 : []),
               { title: t("Integrations"), href: "/integrations" },
               { title: t("Skills"), href: "/skills" },
+              { title: t("Memory"), href: "/memory" },
               ...(messagingEnabled ? [{ title: t("Messaging"), href: "/messaging" } as const] : []),
               { title: t("AI data sharing"), href: "/ai-data-sharing" },
             ] as const

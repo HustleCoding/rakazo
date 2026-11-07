@@ -2365,17 +2365,26 @@ describeJourneys("required product journeys", () => {
       prisma.run.count({
         where: { threadId: group.threadId, trigger: "user", botId },
       });
-    const botABefore = await countUserRuns(botA.id);
-    const botBBefore = await countUserRuns(botB.id);
-    const botCBefore = await countUserRuns(botC.id);
-    const botDBefore = await countUserRuns(botD.id);
+    const memberIds = [botA.id, botB.id, botC.id, botD.id];
+    const userRunsBefore = await Promise.all(memberIds.map(countUserRuns));
+    const otherRunsBefore = await prisma.run.count({
+      where: { threadId: group.threadId, trigger: { not: "user" } },
+    });
     await sendGroupAndWait(app, ada, group.id, "hello team");
+    // A message that names nobody reaches every member once; their replies wake no one.
+    expect(await Promise.all(memberIds.map(countUserRuns))).toEqual(
+      userRunsBefore.map((count) => count + 1),
+    );
     expect(
-      (await countUserRuns(botA.id)) +
-        (await countUserRuns(botB.id)) +
-        (await countUserRuns(botC.id)) +
-        (await countUserRuns(botD.id)),
-    ).toBe(botABefore + botBBefore + botCBefore + botDBefore + 1);
+      await prisma.run.count({ where: { threadId: group.threadId, trigger: { not: "user" } } }),
+    ).toBe(otherRunsBefore);
+    const hello = await prisma.run.findMany({
+      where: { threadId: group.threadId, botId: { in: memberIds } },
+      orderBy: { createdAt: "desc" },
+      take: memberIds.length,
+      select: { groupReplyOptional: true },
+    });
+    expect(hello.map((run) => run.groupReplyOptional)).toEqual([true, true, true, true]);
 
     await sendGroupAndWait(app, ada, group.id, "@BotA hand this to Writer for the draft", botA.id);
     const handoffSnap = await rpc<Snap>(app, ada, "threads/get", { groupId: group.id });
@@ -3682,7 +3691,7 @@ describeJourneys("required product journeys", () => {
       );
     });
 
-    it("organize_bot sets, clears and pins sections for bots and groups of the user only", async () => {
+    it("organize_bot sets, clears and pins sections for bots and groups in its own space only", async () => {
       const { cookie, me, chief } = await fleetOwner("organize");
       const outsider = await signup(
         app,
@@ -3690,8 +3699,14 @@ describeJourneys("required product journeys", () => {
         "Other",
       );
       const outsiderMe = await rpc<Me>(app, outsider, "me");
+      // Sections are shared within a space, so another user's lives in their own space.
       const foreignSection = await prisma.botSection.create({
-        data: { spaceId: me.spaceId, userId: outsiderMe.userId, name: "Research", position: 0 },
+        data: {
+          spaceId: outsiderMe.spaceId,
+          userId: outsiderMe.userId,
+          name: "Research",
+          position: 0,
+        },
       });
       const alpha = await createBot(cookie, "Alpha");
       const beta = await createBot(cookie, "Beta");

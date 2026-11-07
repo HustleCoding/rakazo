@@ -56,6 +56,6 @@ test.describe("touch composer", () => {
 test("keeps the existing desktop composer typography", async ({ page }, testInfo) => {
   const composer = await openComposer(page);
   await composer.fill("A desktop draft with the original typography.");
-  await expectTypography(composer, "14px", "20px");
+  await expectTypography(composer, "15px", "22px");
   await captureScreenshot(page, testInfo, "composer-desktop-typography");
 });
